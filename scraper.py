@@ -331,6 +331,7 @@ def notify_price_changes(config: dict, changes: list[dict]) -> None:
 async def scrape_collection(url: str) -> dict:
     """
     Scrape a collection page and extract product data.
+    Visits each product page to check stock status.
 
     Args:
         url: The collection URL to scrape
@@ -338,12 +339,13 @@ async def scrape_collection(url: str) -> dict:
     Returns:
         dict with products list and metadata
     """
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scraping: {url}")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scraping collection: {url}")
 
     async with AsyncWebCrawler(
         headless=True,
         verbose=False,
     ) as crawler:
+        # First get the collection page to find all products
         result = await crawler.arun(
             url=url,
             bypass_cache=True,
@@ -353,19 +355,77 @@ async def scrape_collection(url: str) -> dict:
         if not result.success:
             raise Exception(f"Failed to fetch page: {result.error_message}")
 
-        return parse_products(result.markdown)
+        # Parse basic product info from collection
+        products = parse_products_from_collection(result.markdown)
+
+        # Now visit each product page to check stock status
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking stock for {len(products)} products...")
+
+        for i, product in enumerate(products):
+            if product.get("url"):
+                try:
+                    print(f"  [{i+1}/{len(products)}] {product['name']}...", end=" ", flush=True)
+                    stock_result = await crawler.arun(
+                        url=product["url"],
+                        bypass_cache=True,
+                        page_timeout=30000,
+                    )
+                    if stock_result.success:
+                        product["in_stock"] = check_stock_status(stock_result.markdown)
+                        print("✓" if product["in_stock"] else "✗ OUT OF STOCK")
+                    else:
+                        print("? (failed)")
+                except Exception as e:
+                    print(f"? (error: {e})")
+
+        return {
+            "scraped_at": datetime.now().isoformat(),
+            "source_url": CONFIG["collection_url"],
+            "product_count": len(products),
+            "products": products,
+        }
 
 
-def parse_products(markdown: str) -> dict:
-    """
-    Parse product data from markdown content.
+def check_stock_status(markdown: str) -> bool:
+    """Check if product is in stock based on product page content."""
+    markdown_lower = markdown.lower()
 
-    Args:
-        markdown: Raw markdown from crawler
+    # Out of stock indicators
+    out_of_stock_indicators = [
+        'uitverkocht',
+        'out of stock',
+        'sold out',
+        'niet beschikbaar',
+        'currently unavailable',
+        'niet op voorraad',
+        'add to cart disabled',
+    ]
 
-    Returns:
-        dict with products list and metadata
-    """
+    # In stock indicators (stronger signal)
+    in_stock_indicators = [
+        'in winkelwagen',
+        'add to cart',
+        'toevoegen aan',
+        'in stock',
+        'op voorraad',
+    ]
+
+    # Check for out of stock first
+    for indicator in out_of_stock_indicators:
+        if indicator in markdown_lower:
+            return False
+
+    # Check for add to cart button (means in stock)
+    for indicator in in_stock_indicators:
+        if indicator in markdown_lower:
+            return True
+
+    # Default to in stock if unclear
+    return True
+
+
+def parse_products_from_collection(markdown: str) -> list[dict]:
+    """Parse basic product info from collection page."""
     products = []
 
     # Find all product links with full URL
@@ -377,16 +437,11 @@ def parse_products(markdown: str) -> dict:
     # Find all prices in the markdown
     all_prices = re.findall(r'(?:Van\s+)?€\s*([\d,\.]+)\s*EUR?', markdown)
 
-    # Check for out of stock indicators
-    out_of_stock_indicators = ['uitverkocht', 'out of stock', 'sold out', 'niet beschikbaar']
-    markdown_lower = markdown.lower()
-
     # Track seen URLs to avoid duplicates
     seen_urls = set()
     price_index = 0
 
     for name, url in product_links:
-        # Skip duplicates and non-product links
         if url in seen_urls:
             continue
         if not any(kw in name.upper() for kw in ['PLA', 'PETG', 'ABS', 'TPU', 'PA', 'ASA', 'PPS', 'PVA', 'SUPPORT']):
@@ -394,7 +449,6 @@ def parse_products(markdown: str) -> dict:
 
         seen_urls.add(url)
 
-        # Try to get corresponding price
         price = None
         price_eur = None
         if price_index < len(all_prices):
@@ -406,18 +460,7 @@ def parse_products(markdown: str) -> dict:
                 pass
             price_index += 1
 
-        # Extract product handle from URL
         handle = url.split('/products/')[-1] if '/products/' in url else None
-
-        # Check stock status (basic check - can be enhanced)
-        # Look for out of stock text near the product name in markdown
-        in_stock = True
-        name_pos = markdown_lower.find(name.lower())
-        if name_pos != -1:
-            # Check 500 chars after product name for stock indicators
-            context = markdown_lower[name_pos:name_pos + 500]
-            if any(indicator in context for indicator in out_of_stock_indicators):
-                in_stock = False
 
         products.append({
             "name": name.strip(),
@@ -425,15 +468,12 @@ def parse_products(markdown: str) -> dict:
             "price": price,
             "price_eur": price_eur,
             "url": url,
-            "in_stock": in_stock,
+            "in_stock": True,  # Will be updated when visiting product page
         })
 
-    return {
-        "scraped_at": datetime.now().isoformat(),
-        "source_url": CONFIG["collection_url"],
-        "product_count": len(products),
-        "products": products,
-    }
+    return products
+
+
 
 
 # =============================================================================
