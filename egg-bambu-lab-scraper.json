@@ -13,7 +13,7 @@
         "Python 3.11": "ghcr.io/parkervcp/yolks:python_3.11"
     },
     "file_denylist": [],
-    "startup": "python3 scraper.py --csv",
+    "startup": "if [ ! -f .deps_installed ]; then pip install -r requirements.txt && touch .deps_installed; fi && python3 scraper.py --csv",
     "config": {
         "files": "{}",
         "startup": "{\r\n    \"done\": \"Done!\"\r\n}",
