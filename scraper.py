@@ -471,7 +471,7 @@ def check_stock_status(markdown: str, html: str = None) -> tuple[bool, str | Non
             except (json.JSONDecodeError, KeyError, TypeError):
                 pass
 
-        # Method 2: Try JSON-LD schema (fallback)
+        # Method 2: Try JSON-LD schema
         if not variants:
             schema_matches = re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
             for schema_text in schema_matches:
@@ -480,8 +480,29 @@ def check_stock_status(markdown: str, html: str = None) -> tuple[bool, str | Non
                     if isinstance(schema_data, list):
                         schema_data = schema_data[0] if schema_data else {}
 
-                    # Look for Product type with offers
-                    if schema_data.get("@type") == "Product" or "offers" in schema_data:
+                    # ProductGroup with hasVariant (Bambu Lab uses this)
+                    if schema_data.get("@type") == "ProductGroup" and "hasVariant" in schema_data:
+                        for v in schema_data.get("hasVariant", []):
+                            variant_name = v.get("name", "Default")
+                            # Clean up variant name (remove long product prefix)
+                            if " / " in variant_name:
+                                parts = variant_name.split(" / ")
+                                variant_name = parts[0].split(" - ")[-1] if " - " in parts[0] else parts[0]
+
+                            offers = v.get("offers", {})
+                            availability = offers.get("availability", "")
+                            in_stock = "InStock" in str(availability)
+                            variants.append({
+                                "name": variant_name,
+                                "in_stock": in_stock,
+                                "price": offers.get("price"),
+                                "eta": None,
+                            })
+                        if variants:
+                            break
+
+                    # Standard Product with offers (fallback)
+                    elif schema_data.get("@type") == "Product" or "offers" in schema_data:
                         offers = schema_data.get("offers", [])
                         if isinstance(offers, dict):
                             offers = [offers]
