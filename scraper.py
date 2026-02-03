@@ -340,7 +340,10 @@ async def scrape_collection(url: str) -> dict:
     """
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Scraping: {url}")
 
-    async with AsyncWebCrawler() as crawler:
+    async with AsyncWebCrawler(
+        headless=True,
+        verbose=False,
+    ) as crawler:
         result = await crawler.arun(
             url=url,
             bypass_cache=True,
