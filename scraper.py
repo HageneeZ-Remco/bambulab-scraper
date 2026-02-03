@@ -216,12 +216,25 @@ def notify_out_of_stock(config: dict, products: list[dict]) -> None:
     webhooks = get_webhooks_for_event(config, "stock_alerts")
 
     for product in products:
+        # Build variant info
+        variants = product.get("variants", [])
+        out_of_stock_variants = [v for v in variants if not v.get("in_stock")]
+
         fields = [
             {"name": "Price", "value": product.get("price", "N/A"), "inline": True},
         ]
+
         # Add ETA if available
         if product.get("eta"):
             fields.append({"name": "ETA", "value": product.get("eta"), "inline": True})
+
+        # Add out of stock colors
+        if out_of_stock_variants:
+            color_names = [v.get("name", "?") for v in out_of_stock_variants[:10]]  # Max 10
+            colors_text = ", ".join(color_names)
+            if len(out_of_stock_variants) > 10:
+                colors_text += f" +{len(out_of_stock_variants) - 10} more"
+            fields.append({"name": f"Out of Stock ({len(out_of_stock_variants)})", "value": colors_text, "inline": False})
 
         send_discord_notification(
             webhooks=webhooks,
@@ -243,15 +256,27 @@ def notify_in_stock(config: dict, products: list[dict]) -> None:
     webhooks = get_webhooks_for_event(config, "stock_alerts")
 
     for product in products:
+        variants = product.get("variants", [])
+        in_stock_variants = [v for v in variants if v.get("in_stock")]
+
+        fields = [
+            {"name": "Price", "value": product.get("price", "N/A"), "inline": True},
+        ]
+
+        # Add in stock colors
+        if in_stock_variants:
+            color_names = [v.get("name", "?") for v in in_stock_variants[:10]]
+            colors_text = ", ".join(color_names)
+            if len(in_stock_variants) > 10:
+                colors_text += f" +{len(in_stock_variants) - 10} more"
+            fields.append({"name": f"Available ({len(in_stock_variants)})", "value": colors_text, "inline": False})
+
         send_discord_notification(
             webhooks=webhooks,
             title="✅ Back in Stock!",
             description=f"**{product['name']}** is now available",
             color=COLORS["in_stock"],
-            fields=[
-                {"name": "Price", "value": product.get("price", "N/A"), "inline": True},
-                {"name": "Handle", "value": product.get("handle", "N/A"), "inline": True},
-            ],
+            fields=fields,
             url=product.get("url")
         )
 
@@ -375,13 +400,27 @@ async def scrape_collection(url: str) -> dict:
                         page_timeout=30000,
                     )
                     if stock_result.success:
-                        in_stock, eta = check_stock_status(stock_result.markdown)
-                        product["in_stock"] = in_stock
+                        html = stock_result.html if hasattr(stock_result, 'html') else None
+                        any_in_stock, eta, variants = check_stock_status(stock_result.markdown, html)
+                        product["in_stock"] = any_in_stock
                         product["eta"] = eta
-                        if in_stock:
-                            print("✓")
+                        product["variants"] = variants
+
+                        # Count stock status
+                        if variants:
+                            in_count = sum(1 for v in variants if v["in_stock"])
+                            out_count = len(variants) - in_count
+                            if out_count == 0:
+                                print(f"✓ ({len(variants)} colors)")
+                            elif in_count == 0:
+                                print(f"✗ ALL OUT OF STOCK ({len(variants)} colors)" + (f" ETA: {eta}" if eta else ""))
+                            else:
+                                print(f"⚠ {out_count}/{len(variants)} colors out of stock")
                         else:
-                            print(f"✗ OUT OF STOCK" + (f" (ETA: {eta})" if eta else ""))
+                            if any_in_stock:
+                                print("✓")
+                            else:
+                                print(f"✗ OUT OF STOCK" + (f" (ETA: {eta})" if eta else ""))
                     else:
                         print("? (failed)")
                 except Exception as e:
@@ -395,62 +434,88 @@ async def scrape_collection(url: str) -> dict:
         }
 
 
-def check_stock_status(markdown: str) -> tuple[bool, str | None]:
+def check_stock_status(markdown: str, html: str = None) -> tuple[bool, str | None, list[dict]]:
     """
-    Check if product is in stock based on product page content.
+    Check stock status for all variants of a product.
 
     Returns:
-        tuple of (in_stock: bool, eta: str | None)
+        tuple of (any_in_stock: bool, eta: str | None, variants: list[dict])
+        variants contains: [{"name": "White", "in_stock": True, "eta": None}, ...]
     """
     markdown_lower = markdown.lower()
+    variants = []
 
-    # Extract ETA date if present (format: "ETA: 07 februari 2026" or "ETA 07 Feb 2026")
+    # Try to extract variant data from JSON-LD schema
+    if html:
+        # Look for JSON-LD product schema with offers
+        schema_match = re.search(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if schema_match:
+            try:
+                schema_data = json.loads(schema_match.group(1))
+                if isinstance(schema_data, list):
+                    schema_data = schema_data[0] if schema_data else {}
+
+                # Extract offers (variants)
+                offers = schema_data.get("offers", [])
+                if isinstance(offers, dict):
+                    offers = [offers]
+
+                for offer in offers:
+                    variant_name = offer.get("name", "Default")
+                    availability = offer.get("availability", "")
+                    in_stock = "InStock" in availability
+                    variants.append({
+                        "name": variant_name,
+                        "in_stock": in_stock,
+                        "price": offer.get("price"),
+                        "eta": None,
+                    })
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+    # Extract ETA date if present
     eta = None
     eta_patterns = [
-        r'eta[:\s]+(\d{1,2}\s+\w+\s+\d{4})',  # ETA: 07 februari 2026
-        r'eta[:\s]+(\d{1,2}\s+\w+)',            # ETA: 07 Feb
+        r'eta[:\s]+(\d{1,2}\s+\w+\s+\d{4})',
+        r'eta[:\s]+(\d{1,2}\s+\w+)',
         r'expected[:\s]+(\d{1,2}\s+\w+\s+\d{4})',
         r'verwacht[:\s]+(\d{1,2}\s+\w+\s+\d{4})',
     ]
     for pattern in eta_patterns:
         match = re.search(pattern, markdown_lower)
         if match:
-            eta = match.group(1).title()  # Capitalize nicely
+            eta = match.group(1).title()
             break
 
-    # Out of stock indicators
+    # If we found variants from schema, use that data
+    if variants:
+        any_in_stock = any(v["in_stock"] for v in variants)
+        out_of_stock_variants = [v for v in variants if not v["in_stock"]]
+        # Add ETA to out of stock variants
+        for v in out_of_stock_variants:
+            v["eta"] = eta
+        return any_in_stock, eta, variants
+
+    # Fallback: text-based detection (no variant info)
     out_of_stock_indicators = [
-        'uitverkocht',
-        'out of stock',
-        'sold out',
-        'niet beschikbaar',
-        'currently unavailable',
-        'niet op voorraad',
-        'laat het me weten als het beschikbaar is',  # "Notify me" button
-        'notify me when available',
+        'uitverkocht', 'out of stock', 'sold out', 'niet beschikbaar',
+        'currently unavailable', 'niet op voorraad',
+        'laat het me weten als het beschikbaar is', 'notify me when available',
     ]
-
-    # In stock indicators (stronger signal)
     in_stock_indicators = [
-        'in winkelwagen',
-        'add to cart',
-        'toevoegen aan winkelwagen',
-        'in stock',
-        'op voorraad',
+        'in winkelwagen', 'add to cart', 'toevoegen aan winkelwagen',
+        'in stock', 'op voorraad',
     ]
 
-    # Check for out of stock first
     for indicator in out_of_stock_indicators:
         if indicator in markdown_lower:
-            return False, eta
+            return False, eta, []
 
-    # Check for add to cart button (means in stock)
     for indicator in in_stock_indicators:
         if indicator in markdown_lower:
-            return True, None
+            return True, None, []
 
-    # Default to in stock if unclear
-    return True, None
+    return True, None, []
 
 
 def parse_products_from_collection(markdown: str) -> list[dict]:
@@ -497,8 +562,9 @@ def parse_products_from_collection(markdown: str) -> list[dict]:
             "price": price,
             "price_eur": price_eur,
             "url": url,
-            "in_stock": True,  # Will be updated when visiting product page
-            "eta": None,       # Will be updated if out of stock with ETA
+            "in_stock": True,   # Will be updated when visiting product page
+            "eta": None,        # Will be updated if out of stock with ETA
+            "variants": [],     # Will contain per-color stock info
         })
 
     return products
