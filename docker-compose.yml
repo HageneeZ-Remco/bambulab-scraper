@@ -1,32 +1,24 @@
 version: '3.8'
 
 services:
+  # Run once and exit (for cron on host or manual runs)
   bambu-scraper:
     build: .
     container_name: bambu-scraper
     volumes:
-      # Persist data between runs
       - ./data:/app/data
-      # Your config with webhooks
       - ./config.json:/app/config.json:ro
     environment:
       - TZ=Europe/Amsterdam
-    # Run once and exit (for cron on host)
-    # Or use the cron service below for scheduled runs
 
-  # Optional: scheduled runs inside container
-  bambu-scraper-cron:
+  # Keep running, scrape every hour (recommended)
+  bambu-scraper-loop:
     build: .
-    container_name: bambu-scraper-cron
+    container_name: bambu-scraper-loop
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json:ro
     environment:
       - TZ=Europe/Amsterdam
-      - CRON_SCHEDULE=0 * * * *  # Every hour
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        echo "$$CRON_SCHEDULE python /app/scraper.py --csv >> /var/log/scraper.log 2>&1" | crontab -
-        cron -f
+    command: ["python", "scraper.py", "--csv", "--loop", "60"]
     restart: unless-stopped

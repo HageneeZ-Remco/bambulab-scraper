@@ -753,6 +753,7 @@ async def main():
     parser.add_argument("--no-notify", action="store_true", help="Skip Discord notifications")
     parser.add_argument("--force-notify", action="store_true", help="Send notifications for ALL current out-of-stock items (useful for first run)")
     parser.add_argument("--test-webhook", help="Send test notification to webhook URL")
+    parser.add_argument("--loop", type=int, metavar="MINUTES", help="Keep running, scrape every N minutes")
     args = parser.parse_args()
 
     # Setup paths
@@ -869,6 +870,106 @@ async def main():
         return 1
 
 
+async def run_loop(interval_minutes: int, args):
+    """Run scraper in a loop with specified interval."""
+    import time
+
+    print(f"[LOOP] Starting scraper loop - running every {interval_minutes} minutes")
+    print(f"[LOOP] Press Ctrl+C to stop\n")
+
+    # Store args for reuse but disable force_notify after first run
+    first_run = True
+
+    while True:
+        try:
+            print(f"\n{'='*60}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scrape...")
+            print(f"{'='*60}")
+
+            # Run the scraper (inline version of main logic)
+            script_dir = Path(__file__).parent
+            output_dir = script_dir / CONFIG["output_dir"]
+            json_path = args.output or str(output_dir / CONFIG["output_file"])
+            csv_path = str(output_dir / CONFIG["csv_file"])
+            config_path = str(script_dir / CONFIG["config_file"])
+
+            config = load_config(config_path)
+            old_data = load_previous_data(json_path)
+
+            data = await scrape_collection(CONFIG["collection_url"])
+
+            print(f"\nScraped {data['product_count']} products")
+
+            changes = compare_data(old_data, data)
+
+            # Force notify only on first run if flag was set
+            if first_run and args.force_notify:
+                all_out_of_stock = []
+                for product in data.get("products", []):
+                    for variant in product.get("variants", []):
+                        if not variant.get("in_stock", True):
+                            all_out_of_stock.append({
+                                "product_name": product.get("name"),
+                                "variant_name": variant.get("name"),
+                                "price": variant.get("price"),
+                                "eta": variant.get("eta") or product.get("eta"),
+                                "url": product.get("url"),
+                            })
+                changes["out_of_stock_variants"] = all_out_of_stock
+                print(f"[FORCE] First run: notifying {len(all_out_of_stock)} out-of-stock variants")
+                first_run = False
+
+            # Log changes
+            if changes["out_of_stock_variants"]:
+                print(f"\n⚠️ OUT OF STOCK ({len(changes['out_of_stock_variants'])} colors)")
+            if changes["in_stock_variants"]:
+                print(f"✅ BACK IN STOCK ({len(changes['in_stock_variants'])} colors)")
+            if changes["price_changes"]:
+                print(f"💰 PRICE CHANGES ({len(changes['price_changes'])})")
+
+            # Send notifications
+            if not args.no_notify:
+                notify_new_items(config, changes["new_items"])
+                notify_removed_items(config, changes["removed_items"])
+                notify_out_of_stock(config, changes["out_of_stock_variants"])
+                notify_in_stock(config, changes["in_stock_variants"])
+                notify_price_changes(config, changes["price_changes"])
+
+            save_json(data, json_path)
+            if args.csv:
+                save_csv(data, csv_path)
+
+            next_run = datetime.now().timestamp() + (interval_minutes * 60)
+            next_run_str = datetime.fromtimestamp(next_run).strftime('%H:%M:%S')
+            print(f"\n[LOOP] Next run at {next_run_str} (sleeping {interval_minutes} min)")
+
+            time.sleep(interval_minutes * 60)
+
+        except KeyboardInterrupt:
+            print("\n[LOOP] Stopped by user")
+            break
+        except Exception as e:
+            print(f"[ERROR] Scrape failed: {e}")
+            print(f"[LOOP] Retrying in {interval_minutes} minutes...")
+            time.sleep(interval_minutes * 60)
+
+
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
-    sys.exit(exit_code)
+    # Quick parse to check for --loop
+    import sys
+    if "--loop" in sys.argv:
+        # Parse args first
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--output", "-o")
+        parser.add_argument("--csv", action="store_true")
+        parser.add_argument("--quiet", "-q", action="store_true")
+        parser.add_argument("--no-notify", action="store_true")
+        parser.add_argument("--force-notify", action="store_true")
+        parser.add_argument("--test-webhook")
+        parser.add_argument("--loop", type=int, metavar="MINUTES")
+        args = parser.parse_args()
+
+        asyncio.run(run_loop(args.loop, args))
+    else:
+        exit_code = asyncio.run(main())
+        sys.exit(exit_code)
