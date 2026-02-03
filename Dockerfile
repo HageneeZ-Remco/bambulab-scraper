@@ -21,8 +21,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install playwright with system chromium
-RUN pip install playwright && playwright install-deps
+# Install playwright and download browser
+RUN pip install playwright && \
+    playwright install chromium && \
+    playwright install-deps
 
 # Copy app files
 COPY scraper.py .
