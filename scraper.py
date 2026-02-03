@@ -216,15 +216,19 @@ def notify_out_of_stock(config: dict, products: list[dict]) -> None:
     webhooks = get_webhooks_for_event(config, "stock_alerts")
 
     for product in products:
+        fields = [
+            {"name": "Price", "value": product.get("price", "N/A"), "inline": True},
+        ]
+        # Add ETA if available
+        if product.get("eta"):
+            fields.append({"name": "ETA", "value": product.get("eta"), "inline": True})
+
         send_discord_notification(
             webhooks=webhooks,
             title="⚠️ Out of Stock",
             description=f"**{product['name']}** is now out of stock",
             color=COLORS["out_of_stock"],
-            fields=[
-                {"name": "Price", "value": product.get("price", "N/A"), "inline": True},
-                {"name": "Handle", "value": product.get("handle", "N/A"), "inline": True},
-            ],
+            fields=fields,
             url=product.get("url")
         )
 
@@ -371,8 +375,13 @@ async def scrape_collection(url: str) -> dict:
                         page_timeout=30000,
                     )
                     if stock_result.success:
-                        product["in_stock"] = check_stock_status(stock_result.markdown)
-                        print("✓" if product["in_stock"] else "✗ OUT OF STOCK")
+                        in_stock, eta = check_stock_status(stock_result.markdown)
+                        product["in_stock"] = in_stock
+                        product["eta"] = eta
+                        if in_stock:
+                            print("✓")
+                        else:
+                            print(f"✗ OUT OF STOCK" + (f" (ETA: {eta})" if eta else ""))
                     else:
                         print("? (failed)")
                 except Exception as e:
@@ -386,9 +395,28 @@ async def scrape_collection(url: str) -> dict:
         }
 
 
-def check_stock_status(markdown: str) -> bool:
-    """Check if product is in stock based on product page content."""
+def check_stock_status(markdown: str) -> tuple[bool, str | None]:
+    """
+    Check if product is in stock based on product page content.
+
+    Returns:
+        tuple of (in_stock: bool, eta: str | None)
+    """
     markdown_lower = markdown.lower()
+
+    # Extract ETA date if present (format: "ETA: 07 februari 2026" or "ETA 07 Feb 2026")
+    eta = None
+    eta_patterns = [
+        r'eta[:\s]+(\d{1,2}\s+\w+\s+\d{4})',  # ETA: 07 februari 2026
+        r'eta[:\s]+(\d{1,2}\s+\w+)',            # ETA: 07 Feb
+        r'expected[:\s]+(\d{1,2}\s+\w+\s+\d{4})',
+        r'verwacht[:\s]+(\d{1,2}\s+\w+\s+\d{4})',
+    ]
+    for pattern in eta_patterns:
+        match = re.search(pattern, markdown_lower)
+        if match:
+            eta = match.group(1).title()  # Capitalize nicely
+            break
 
     # Out of stock indicators
     out_of_stock_indicators = [
@@ -398,14 +426,15 @@ def check_stock_status(markdown: str) -> bool:
         'niet beschikbaar',
         'currently unavailable',
         'niet op voorraad',
-        'add to cart disabled',
+        'laat het me weten als het beschikbaar is',  # "Notify me" button
+        'notify me when available',
     ]
 
     # In stock indicators (stronger signal)
     in_stock_indicators = [
         'in winkelwagen',
         'add to cart',
-        'toevoegen aan',
+        'toevoegen aan winkelwagen',
         'in stock',
         'op voorraad',
     ]
@@ -413,15 +442,15 @@ def check_stock_status(markdown: str) -> bool:
     # Check for out of stock first
     for indicator in out_of_stock_indicators:
         if indicator in markdown_lower:
-            return False
+            return False, eta
 
     # Check for add to cart button (means in stock)
     for indicator in in_stock_indicators:
         if indicator in markdown_lower:
-            return True
+            return True, None
 
     # Default to in stock if unclear
-    return True
+    return True, None
 
 
 def parse_products_from_collection(markdown: str) -> list[dict]:
@@ -469,6 +498,7 @@ def parse_products_from_collection(markdown: str) -> list[dict]:
             "price_eur": price_eur,
             "url": url,
             "in_stock": True,  # Will be updated when visiting product page
+            "eta": None,       # Will be updated if out of stock with ETA
         })
 
     return products
