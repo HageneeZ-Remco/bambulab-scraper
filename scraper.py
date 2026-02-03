@@ -751,6 +751,7 @@ async def main():
     parser.add_argument("--csv", action="store_true", help="Also export to CSV")
     parser.add_argument("--quiet", "-q", action="store_true", help="Minimal output")
     parser.add_argument("--no-notify", action="store_true", help="Skip Discord notifications")
+    parser.add_argument("--force-notify", action="store_true", help="Send notifications for ALL current out-of-stock items (useful for first run)")
     parser.add_argument("--test-webhook", help="Send test notification to webhook URL")
     args = parser.parse_args()
 
@@ -800,6 +801,22 @@ async def main():
 
         # Compare with previous data
         changes = compare_data(old_data, data)
+
+        # Force notify: build list of ALL current out-of-stock variants
+        if args.force_notify:
+            all_out_of_stock = []
+            for product in data.get("products", []):
+                for variant in product.get("variants", []):
+                    if not variant.get("in_stock", True):
+                        all_out_of_stock.append({
+                            "product_name": product.get("name"),
+                            "variant_name": variant.get("name"),
+                            "price": variant.get("price"),
+                            "eta": variant.get("eta") or product.get("eta"),
+                            "url": product.get("url"),
+                        })
+            changes["out_of_stock_variants"] = all_out_of_stock
+            print(f"\n[FORCE] Found {len(all_out_of_stock)} out-of-stock variants to notify")
 
         # Log changes
         if not args.quiet:
