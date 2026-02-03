@@ -400,7 +400,8 @@ async def scrape_collection(url: str) -> dict:
                         page_timeout=30000,
                     )
                     if stock_result.success:
-                        html = stock_result.html if hasattr(stock_result, 'html') else None
+                        # crawl4ai returns raw_html or html depending on version
+                        html = getattr(stock_result, 'raw_html', None) or getattr(stock_result, 'html', None) or ""
                         any_in_stock, eta, variants = check_stock_status(stock_result.markdown, html)
                         product["in_stock"] = any_in_stock
                         product["eta"] = eta
@@ -445,33 +446,60 @@ def check_stock_status(markdown: str, html: str = None) -> tuple[bool, str | Non
     markdown_lower = markdown.lower()
     variants = []
 
-    # Try to extract variant data from JSON-LD schema
     if html:
-        # Look for JSON-LD product schema with offers
-        schema_match = re.search(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
-        if schema_match:
+        # Method 1: Try __NEXT_DATA__ (Next.js stores product data here)
+        next_data_match = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if next_data_match:
             try:
-                schema_data = json.loads(schema_match.group(1))
-                if isinstance(schema_data, list):
-                    schema_data = schema_data[0] if schema_data else {}
+                next_data = json.loads(next_data_match.group(1))
+                # Navigate to product data - structure varies but usually in props
+                page_props = next_data.get("props", {}).get("pageProps", {})
+                product = page_props.get("product", {}) or page_props.get("data", {}).get("product", {})
 
-                # Extract offers (variants)
-                offers = schema_data.get("offers", [])
-                if isinstance(offers, dict):
-                    offers = [offers]
-
-                for offer in offers:
-                    variant_name = offer.get("name", "Default")
-                    availability = offer.get("availability", "")
-                    in_stock = "InStock" in availability
+                # Get variants from product
+                product_variants = product.get("variants", [])
+                for v in product_variants:
+                    variant_name = v.get("title", v.get("name", "Default"))
+                    # Check availability - could be "available", "in_stock", etc.
+                    available = v.get("available", v.get("availableForSale", v.get("in_stock", True)))
                     variants.append({
                         "name": variant_name,
-                        "in_stock": in_stock,
-                        "price": offer.get("price"),
+                        "in_stock": bool(available),
+                        "price": v.get("price", {}).get("amount") if isinstance(v.get("price"), dict) else v.get("price"),
                         "eta": None,
                     })
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, TypeError):
                 pass
+
+        # Method 2: Try JSON-LD schema (fallback)
+        if not variants:
+            schema_matches = re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
+            for schema_text in schema_matches:
+                try:
+                    schema_data = json.loads(schema_text)
+                    if isinstance(schema_data, list):
+                        schema_data = schema_data[0] if schema_data else {}
+
+                    # Look for Product type with offers
+                    if schema_data.get("@type") == "Product" or "offers" in schema_data:
+                        offers = schema_data.get("offers", [])
+                        if isinstance(offers, dict):
+                            offers = [offers]
+
+                        for offer in offers:
+                            variant_name = offer.get("name", offer.get("sku", "Default"))
+                            availability = offer.get("availability", "")
+                            in_stock = "InStock" in str(availability)
+                            variants.append({
+                                "name": variant_name,
+                                "in_stock": in_stock,
+                                "price": offer.get("price"),
+                                "eta": None,
+                            })
+                        if variants:
+                            break
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
 
     # Extract ETA date if present
     eta = None
