@@ -1,0 +1,72 @@
+{
+    "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PTERODACTYL PANEL -,, ",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-02-03T23:00:00+00:00",
+    "name": "Bambu Lab Scraper",
+    "author": "hageneez@gmail.com",
+    "description": "Scrapes Bambu Lab filament prices and sends Discord notifications for stock changes, new items, and price changes.",
+    "features": null,
+    "docker_images": {
+        "Python 3.11": "ghcr.io/parkervcp/yolks:python_3.11"
+    },
+    "file_denylist": [],
+    "startup": "python3 scraper.py --csv",
+    "config": {
+        "files": "{}",
+        "startup": "{\r\n    \"done\": \"Done!\"\r\n}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/bash\napt-get update\napt-get install -y chromium chromium-driver wget curl git\n\ncd /mnt/server\n\n# Download scraper files\nif [ ! -f scraper.py ]; then\n    echo \"Downloading scraper files...\"\n    curl -sL https://raw.githubusercontent.com/hageneez/bambulab-scraper/main/scraper.py -o scraper.py\n    curl -sL https://raw.githubusercontent.com/hageneez/bambulab-scraper/main/requirements.txt -o requirements.txt\n    curl -sL https://raw.githubusercontent.com/hageneez/bambulab-scraper/main/config.example.json -o config.example.json\nfi\n\n# Install Python dependencies\npip install --no-cache-dir -r requirements.txt\n\n# Setup crawl4ai (skip browser download, use system chromium)\nexport PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1\npip install playwright\nplaywright install-deps chromium || true\n\n# Create config if not exists\nif [ ! -f config.json ]; then\n    cp config.example.json config.json\n    echo \"Created config.json - add your Discord webhooks!\"\nfi\n\n# Create data directory\nmkdir -p data\n\necho \"Installation complete!\"",
+            "container": "ghcr.io/parkervcp/installers:debian",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Discord Webhook (All)",
+            "description": "Discord webhook URL to receive ALL notifications. Leave empty to disable.",
+            "env_variable": "DISCORD_WEBHOOK_ALL",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        },
+        {
+            "name": "Discord Webhook (Stock)",
+            "description": "Discord webhook URL for stock alerts only (in/out of stock).",
+            "env_variable": "DISCORD_WEBHOOK_STOCK",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        },
+        {
+            "name": "Export CSV",
+            "description": "Also export data to CSV file",
+            "env_variable": "EXPORT_CSV",
+            "default_value": "true",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:true,false",
+            "field_type": "text"
+        },
+        {
+            "name": "Cron Schedule",
+            "description": "How often to run (cron format). Default: every hour. Leave empty for single run.",
+            "env_variable": "CRON_SCHEDULE",
+            "default_value": "0 * * * *",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        }
+    ]
+}

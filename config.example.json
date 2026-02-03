@@ -1,0 +1,24 @@
+{
+  "discord_webhooks": {
+    "stock_alerts": [
+      "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+    ],
+    "new_items": [
+      "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+    ],
+    "removed_items": [
+      "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+    ],
+    "price_changes": [
+      "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+    ],
+    "all": []
+  },
+  "notify_on": {
+    "out_of_stock": true,
+    "in_stock": true,
+    "new_items": true,
+    "removed_items": true,
+    "price_changes": true
+  }
+}
