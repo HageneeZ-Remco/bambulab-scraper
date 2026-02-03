@@ -206,78 +206,59 @@ def get_webhooks_for_event(config: dict, event_type: str) -> list[str]:
     return combined
 
 
-def notify_out_of_stock(config: dict, products: list[dict]) -> None:
-    """Send notification for products that went out of stock."""
+def notify_out_of_stock(config: dict, variants: list[dict]) -> None:
+    """Send notification for each variant (color) that went out of stock."""
     if not config.get("notify_on", {}).get("out_of_stock", True):
         return
-    if not products:
+    if not variants:
         return
 
     webhooks = get_webhooks_for_event(config, "stock_alerts")
 
-    for product in products:
-        # Build variant info
-        variants = product.get("variants", [])
-        out_of_stock_variants = [v for v in variants if not v.get("in_stock")]
+    for variant in variants:
+        fields = []
 
-        fields = [
-            {"name": "Price", "value": product.get("price", "N/A"), "inline": True},
-        ]
+        # Add price if available
+        if variant.get("price"):
+            fields.append({"name": "Price", "value": f"€{variant['price']}", "inline": True})
 
         # Add ETA if available
-        if product.get("eta"):
-            fields.append({"name": "ETA", "value": product.get("eta"), "inline": True})
-
-        # Add out of stock colors
-        if out_of_stock_variants:
-            color_names = [v.get("name", "?") for v in out_of_stock_variants[:10]]  # Max 10
-            colors_text = ", ".join(color_names)
-            if len(out_of_stock_variants) > 10:
-                colors_text += f" +{len(out_of_stock_variants) - 10} more"
-            fields.append({"name": f"Out of Stock ({len(out_of_stock_variants)})", "value": colors_text, "inline": False})
+        if variant.get("eta"):
+            fields.append({"name": "ETA", "value": variant.get("eta"), "inline": True})
 
         send_discord_notification(
             webhooks=webhooks,
             title="⚠️ Out of Stock",
-            description=f"**{product['name']}** is now out of stock",
+            description=f"**{variant['product_name']}** - {variant['variant_name']} is now out of stock",
             color=COLORS["out_of_stock"],
-            fields=fields,
-            url=product.get("url")
+            fields=fields if fields else None,
+            url=variant.get("url")
         )
 
 
-def notify_in_stock(config: dict, products: list[dict]) -> None:
-    """Send notification for products that came back in stock."""
+def notify_in_stock(config: dict, variants: list[dict]) -> None:
+    """Send notification for each variant (color) that came back in stock."""
     if not config.get("notify_on", {}).get("in_stock", True):
         return
-    if not products:
+    if not variants:
         return
 
     webhooks = get_webhooks_for_event(config, "stock_alerts")
 
-    for product in products:
-        variants = product.get("variants", [])
-        in_stock_variants = [v for v in variants if v.get("in_stock")]
+    for variant in variants:
+        fields = []
 
-        fields = [
-            {"name": "Price", "value": product.get("price", "N/A"), "inline": True},
-        ]
-
-        # Add in stock colors
-        if in_stock_variants:
-            color_names = [v.get("name", "?") for v in in_stock_variants[:10]]
-            colors_text = ", ".join(color_names)
-            if len(in_stock_variants) > 10:
-                colors_text += f" +{len(in_stock_variants) - 10} more"
-            fields.append({"name": f"Available ({len(in_stock_variants)})", "value": colors_text, "inline": False})
+        # Add price if available
+        if variant.get("price"):
+            fields.append({"name": "Price", "value": f"€{variant['price']}", "inline": True})
 
         send_discord_notification(
             webhooks=webhooks,
             title="✅ Back in Stock!",
-            description=f"**{product['name']}** is now available",
+            description=f"**{variant['product_name']}** - {variant['variant_name']} is now available",
             color=COLORS["in_stock"],
-            fields=fields,
-            url=product.get("url")
+            fields=fields if fields else None,
+            url=variant.get("url")
         )
 
 
@@ -627,17 +608,17 @@ def parse_products_from_collection(markdown: str) -> list[dict]:
 
 def compare_data(old_data: dict, new_data: dict) -> dict:
     """
-    Compare old and new data to detect changes.
+    Compare old and new data to detect changes at the variant (color) level.
 
     Returns:
-        dict with lists of: new_items, removed_items, out_of_stock, in_stock, price_changes
+        dict with lists of: new_items, removed_items, out_of_stock_variants, in_stock_variants, price_changes
     """
     if not old_data:
         return {
             "new_items": [],
             "removed_items": [],
-            "out_of_stock": [],
-            "in_stock": [],
+            "out_of_stock_variants": [],
+            "in_stock_variants": [],
             "price_changes": [],
         }
 
@@ -653,24 +634,49 @@ def compare_data(old_data: dict, new_data: dict) -> dict:
     # Removed items (in old but not in new)
     removed_items = [old_products[h] for h in (old_handles - new_handles)]
 
-    # Stock and price changes (items in both)
-    out_of_stock = []
-    in_stock = []
+    # Variant-level stock changes
+    out_of_stock_variants = []
+    in_stock_variants = []
     price_changes = []
 
     for handle in (old_handles & new_handles):
         old_p = old_products[handle]
         new_p = new_products[handle]
+        product_name = new_p.get("name", handle)
+        product_url = new_p.get("url")
 
-        # Stock change: was in stock, now out of stock
-        if old_p.get("in_stock", True) and not new_p.get("in_stock", True):
-            out_of_stock.append(new_p)
+        # Build variant lookup by name
+        old_variants = {v["name"]: v for v in old_p.get("variants", [])}
+        new_variants = {v["name"]: v for v in new_p.get("variants", [])}
 
-        # Stock change: was out of stock, now in stock
-        if not old_p.get("in_stock", True) and new_p.get("in_stock", True):
-            in_stock.append(new_p)
+        # Check each variant for stock changes
+        for variant_name in set(old_variants.keys()) | set(new_variants.keys()):
+            old_v = old_variants.get(variant_name, {})
+            new_v = new_variants.get(variant_name, {})
 
-        # Price change
+            old_in_stock = old_v.get("in_stock", True) if old_v else True
+            new_in_stock = new_v.get("in_stock", True) if new_v else True
+
+            # Variant went out of stock
+            if old_in_stock and not new_in_stock:
+                out_of_stock_variants.append({
+                    "product_name": product_name,
+                    "variant_name": variant_name,
+                    "price": new_v.get("price"),
+                    "eta": new_v.get("eta") or new_p.get("eta"),
+                    "url": product_url,
+                })
+
+            # Variant came back in stock
+            if not old_in_stock and new_in_stock:
+                in_stock_variants.append({
+                    "product_name": product_name,
+                    "variant_name": variant_name,
+                    "price": new_v.get("price"),
+                    "url": product_url,
+                })
+
+        # Price change (product level)
         old_price = old_p.get("price_eur")
         new_price = new_p.get("price_eur")
 
@@ -688,8 +694,8 @@ def compare_data(old_data: dict, new_data: dict) -> dict:
     return {
         "new_items": new_items,
         "removed_items": removed_items,
-        "out_of_stock": out_of_stock,
-        "in_stock": in_stock,
+        "out_of_stock_variants": out_of_stock_variants,
+        "in_stock_variants": in_stock_variants,
         "price_changes": price_changes,
     }
 
@@ -807,15 +813,17 @@ async def main():
                 for item in changes["removed_items"]:
                     print(f"   - {item['name']}")
 
-            if changes["out_of_stock"]:
-                print(f"\n⚠️ OUT OF STOCK ({len(changes['out_of_stock'])}):")
-                for item in changes["out_of_stock"]:
-                    print(f"   ! {item['name']}")
+            if changes["out_of_stock_variants"]:
+                print(f"\n⚠️ OUT OF STOCK ({len(changes['out_of_stock_variants'])} colors):")
+                for item in changes["out_of_stock_variants"]:
+                    eta = f" (ETA: {item['eta']})" if item.get('eta') else ""
+                    print(f"   ! {item['product_name']} - {item['variant_name']}{eta}")
 
-            if changes["in_stock"]:
-                print(f"\n✅ BACK IN STOCK ({len(changes['in_stock'])}):")
-                for item in changes["in_stock"]:
-                    print(f"   + {item['name']}: {item.get('price', 'N/A')}")
+            if changes["in_stock_variants"]:
+                print(f"\n✅ BACK IN STOCK ({len(changes['in_stock_variants'])} colors):")
+                for item in changes["in_stock_variants"]:
+                    price = f": €{item['price']}" if item.get('price') else ""
+                    print(f"   + {item['product_name']} - {item['variant_name']}{price}")
 
             if changes["price_changes"]:
                 print(f"\n💰 PRICE CHANGES ({len(changes['price_changes'])}):")
@@ -826,8 +834,8 @@ async def main():
         if not args.no_notify:
             notify_new_items(config, changes["new_items"])
             notify_removed_items(config, changes["removed_items"])
-            notify_out_of_stock(config, changes["out_of_stock"])
-            notify_in_stock(config, changes["in_stock"])
+            notify_out_of_stock(config, changes["out_of_stock_variants"])
+            notify_in_stock(config, changes["in_stock_variants"])
             notify_price_changes(config, changes["price_changes"])
 
         # Save results
