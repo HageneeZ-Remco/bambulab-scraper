@@ -137,7 +137,7 @@ def send_discord_notification(
     url: str = None
 ) -> None:
     """
-    Send notification to multiple Discord webhooks.
+    Send notification to multiple Discord webhooks with retry on rate limit.
 
     Args:
         webhooks: List of webhook URLs
@@ -148,12 +148,14 @@ def send_discord_notification(
         thumbnail_url: Optional thumbnail image URL
         url: Optional URL for the embed title
     """
+    import time
+
     if not webhooks:
         return
 
     embed = {
         "title": title,
-        "description": description,
+        "description": description[:4096] if description else "",  # Discord limit
         "color": color,
         "timestamp": datetime.utcnow().isoformat(),
         "footer": {
@@ -162,7 +164,7 @@ def send_discord_notification(
     }
 
     if fields:
-        embed["fields"] = fields
+        embed["fields"] = fields[:25]  # Discord limit: max 25 fields
     if thumbnail_url:
         embed["thumbnail"] = {"url": thumbnail_url}
     if url:
@@ -170,21 +172,37 @@ def send_discord_notification(
 
     payload = {"embeds": [embed]}
 
-    for webhook_url in webhooks:
+    for i, webhook_url in enumerate(webhooks):
         if not webhook_url:
             continue
-        try:
-            response = requests.post(
-                webhook_url,
-                json=payload,
-                timeout=10
-            )
-            if response.status_code == 204:
-                print(f"[DISCORD] Notification sent successfully")
-            else:
-                print(f"[DISCORD] Failed: {response.status_code} - {response.text}")
-        except Exception as e:
-            print(f"[DISCORD] Error sending notification: {e}")
+
+        # Add delay between webhooks to avoid rate limiting
+        if i > 0:
+            time.sleep(0.5)
+
+        # Retry logic for rate limits
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    webhook_url,
+                    json=payload,
+                    timeout=10
+                )
+                if response.status_code == 204:
+                    print(f"[DISCORD] Notification sent successfully")
+                    break
+                elif response.status_code == 429:
+                    # Rate limited - parse Retry-After header
+                    retry_after = float(response.headers.get("Retry-After", 1))
+                    print(f"[DISCORD] Rate limited, waiting {retry_after}s...")
+                    time.sleep(retry_after)
+                else:
+                    print(f"[DISCORD] Failed: {response.status_code} - {response.text}")
+                    break
+            except Exception as e:
+                print(f"[DISCORD] Error sending notification: {e}")
+                break
 
 
 def get_webhooks_for_event(config: dict, event_type: str) -> list[str]:
@@ -207,7 +225,7 @@ def get_webhooks_for_event(config: dict, event_type: str) -> list[str]:
 
 
 def notify_out_of_stock(config: dict, variants: list[dict]) -> None:
-    """Send notification per product for variants that went out of stock."""
+    """Send a SINGLE notification for ALL variants that went out of stock."""
     if not config.get("notify_on", {}).get("out_of_stock", True):
         return
     if not variants:
@@ -225,30 +243,35 @@ def notify_out_of_stock(config: dict, variants: list[dict]) -> None:
         if v.get("eta"):
             by_product[product]["eta"] = v.get("eta")
 
+    total_colors = len(variants)
+    total_products = len(by_product)
+
+    # Build description with all products
+    lines = []
     for product_name, data in by_product.items():
         variant_names = data["variants"]
-        colors_text = ", ".join(variant_names[:15])
-        if len(variant_names) > 15:
-            colors_text += f" +{len(variant_names) - 15} more"
+        colors_text = ", ".join(variant_names[:8])
+        if len(variant_names) > 8:
+            colors_text += f"... +{len(variant_names) - 8}"
+        eta_text = f" (ETA: {data['eta']})" if data.get("eta") else ""
+        lines.append(f"**{product_name}** ({len(variant_names)}): {colors_text}{eta_text}")
 
-        fields = [
-            {"name": f"Colors ({len(variant_names)})", "value": colors_text, "inline": False},
-        ]
-        if data.get("eta"):
-            fields.append({"name": "ETA", "value": data["eta"], "inline": True})
+    # Discord description limit is 4096 chars
+    description = "\n".join(lines)
+    if len(description) > 3900:
+        # Truncate and add summary
+        description = description[:3900] + f"\n\n... and more products"
 
-        send_discord_notification(
-            webhooks=webhooks,
-            title="⚠️ Out of Stock",
-            description=f"**{product_name}** - {len(variant_names)} color(s) now out of stock",
-            color=COLORS["out_of_stock"],
-            fields=fields,
-            url=data.get("url")
-        )
+    send_discord_notification(
+        webhooks=webhooks,
+        title=f"⚠️ Out of Stock Report ({total_colors} colors)",
+        description=description,
+        color=COLORS["out_of_stock"],
+    )
 
 
 def notify_in_stock(config: dict, variants: list[dict]) -> None:
-    """Send notification per product for variants that came back in stock."""
+    """Send a SINGLE notification for ALL variants that came back in stock."""
     if not config.get("notify_on", {}).get("in_stock", True):
         return
     if not variants:
@@ -264,24 +287,29 @@ def notify_in_stock(config: dict, variants: list[dict]) -> None:
             by_product[product] = {"variants": [], "url": v.get("url")}
         by_product[product]["variants"].append(v.get("variant_name", "?"))
 
+    total_colors = len(variants)
+    total_products = len(by_product)
+
+    # Build description with all products
+    lines = []
     for product_name, data in by_product.items():
         variant_names = data["variants"]
-        colors_text = ", ".join(variant_names[:15])
-        if len(variant_names) > 15:
-            colors_text += f" +{len(variant_names) - 15} more"
+        colors_text = ", ".join(variant_names[:8])
+        if len(variant_names) > 8:
+            colors_text += f"... +{len(variant_names) - 8}"
+        lines.append(f"**{product_name}** ({len(variant_names)}): {colors_text}")
 
-        fields = [
-            {"name": f"Colors ({len(variant_names)})", "value": colors_text, "inline": False},
-        ]
+    # Discord description limit is 4096 chars
+    description = "\n".join(lines)
+    if len(description) > 3900:
+        description = description[:3900] + f"\n\n... and more products"
 
-        send_discord_notification(
-            webhooks=webhooks,
-            title="✅ Back in Stock!",
-            description=f"**{product_name}** - {len(variant_names)} color(s) now available",
-            color=COLORS["in_stock"],
-            fields=fields,
-            url=data.get("url")
-        )
+    send_discord_notification(
+        webhooks=webhooks,
+        title=f"✅ Back in Stock! ({total_colors} colors)",
+        description=description,
+        color=COLORS["in_stock"],
+    )
 
 
 def notify_new_items(config: dict, products: list[dict]) -> None:
