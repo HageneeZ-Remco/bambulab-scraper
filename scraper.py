@@ -724,10 +724,10 @@ def save_csv(data: dict, filepath: str) -> None:
         print("No products to save to CSV")
         return
 
-    fieldnames = ["name", "handle", "price", "price_eur", "url", "in_stock"]
+    fieldnames = ["name", "handle", "price", "price_eur", "url", "in_stock", "eta"]
 
     with open(filepath, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         writer.writeheader()
         writer.writerows(products)
 
