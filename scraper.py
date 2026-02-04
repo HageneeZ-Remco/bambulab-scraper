@@ -650,12 +650,15 @@ def compare_data(old_data: dict, new_data: dict) -> dict:
         new_variants = {v["name"]: v for v in new_p.get("variants", [])}
 
         # Check each variant for stock changes
-        for variant_name in set(old_variants.keys()) | set(new_variants.keys()):
-            old_v = old_variants.get(variant_name, {})
-            new_v = new_variants.get(variant_name, {})
+        # Only compare variants that exist in BOTH old and new data
+        common_variants = set(old_variants.keys()) & set(new_variants.keys())
 
-            old_in_stock = old_v.get("in_stock", True) if old_v else True
-            new_in_stock = new_v.get("in_stock", True) if new_v else True
+        for variant_name in common_variants:
+            old_v = old_variants[variant_name]
+            new_v = new_variants[variant_name]
+
+            old_in_stock = old_v.get("in_stock", True)
+            new_in_stock = new_v.get("in_stock", True)
 
             # Variant went out of stock
             if old_in_stock and not new_in_stock:
@@ -667,7 +670,7 @@ def compare_data(old_data: dict, new_data: dict) -> dict:
                     "url": product_url,
                 })
 
-            # Variant came back in stock
+            # Variant came back in stock (only if it exists in both!)
             if not old_in_stock and new_in_stock:
                 in_stock_variants.append({
                     "product_name": product_name,
