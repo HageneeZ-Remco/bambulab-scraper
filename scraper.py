@@ -207,7 +207,7 @@ def get_webhooks_for_event(config: dict, event_type: str) -> list[str]:
 
 
 def notify_out_of_stock(config: dict, variants: list[dict]) -> None:
-    """Send notification for each variant (color) that went out of stock."""
+    """Send notification per product for variants that went out of stock."""
     if not config.get("notify_on", {}).get("out_of_stock", True):
         return
     if not variants:
@@ -215,29 +215,40 @@ def notify_out_of_stock(config: dict, variants: list[dict]) -> None:
 
     webhooks = get_webhooks_for_event(config, "stock_alerts")
 
-    for variant in variants:
-        fields = []
+    # Group variants by product
+    by_product = {}
+    for v in variants:
+        product = v.get("product_name", "Unknown")
+        if product not in by_product:
+            by_product[product] = {"variants": [], "url": v.get("url"), "eta": v.get("eta")}
+        by_product[product]["variants"].append(v.get("variant_name", "?"))
+        if v.get("eta"):
+            by_product[product]["eta"] = v.get("eta")
 
-        # Add price if available
-        if variant.get("price"):
-            fields.append({"name": "Price", "value": f"€{variant['price']}", "inline": True})
+    for product_name, data in by_product.items():
+        variant_names = data["variants"]
+        colors_text = ", ".join(variant_names[:15])
+        if len(variant_names) > 15:
+            colors_text += f" +{len(variant_names) - 15} more"
 
-        # Add ETA if available
-        if variant.get("eta"):
-            fields.append({"name": "ETA", "value": variant.get("eta"), "inline": True})
+        fields = [
+            {"name": f"Colors ({len(variant_names)})", "value": colors_text, "inline": False},
+        ]
+        if data.get("eta"):
+            fields.append({"name": "ETA", "value": data["eta"], "inline": True})
 
         send_discord_notification(
             webhooks=webhooks,
             title="⚠️ Out of Stock",
-            description=f"**{variant['product_name']}** - {variant['variant_name']} is now out of stock",
+            description=f"**{product_name}** - {len(variant_names)} color(s) now out of stock",
             color=COLORS["out_of_stock"],
-            fields=fields if fields else None,
-            url=variant.get("url")
+            fields=fields,
+            url=data.get("url")
         )
 
 
 def notify_in_stock(config: dict, variants: list[dict]) -> None:
-    """Send notification for each variant (color) that came back in stock."""
+    """Send notification per product for variants that came back in stock."""
     if not config.get("notify_on", {}).get("in_stock", True):
         return
     if not variants:
@@ -245,20 +256,31 @@ def notify_in_stock(config: dict, variants: list[dict]) -> None:
 
     webhooks = get_webhooks_for_event(config, "stock_alerts")
 
-    for variant in variants:
-        fields = []
+    # Group variants by product
+    by_product = {}
+    for v in variants:
+        product = v.get("product_name", "Unknown")
+        if product not in by_product:
+            by_product[product] = {"variants": [], "url": v.get("url")}
+        by_product[product]["variants"].append(v.get("variant_name", "?"))
 
-        # Add price if available
-        if variant.get("price"):
-            fields.append({"name": "Price", "value": f"€{variant['price']}", "inline": True})
+    for product_name, data in by_product.items():
+        variant_names = data["variants"]
+        colors_text = ", ".join(variant_names[:15])
+        if len(variant_names) > 15:
+            colors_text += f" +{len(variant_names) - 15} more"
+
+        fields = [
+            {"name": f"Colors ({len(variant_names)})", "value": colors_text, "inline": False},
+        ]
 
         send_discord_notification(
             webhooks=webhooks,
             title="✅ Back in Stock!",
-            description=f"**{variant['product_name']}** - {variant['variant_name']} is now available",
+            description=f"**{product_name}** - {len(variant_names)} color(s) now available",
             color=COLORS["in_stock"],
-            fields=fields if fields else None,
-            url=variant.get("url")
+            fields=fields,
+            url=data.get("url")
         )
 
 
