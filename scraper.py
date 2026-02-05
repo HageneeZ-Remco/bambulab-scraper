@@ -48,7 +48,7 @@ except ImportError:
 
 CONFIG = {
     "base_url": "https://eu.store.bambulab.com",
-    "collection_url": "https://eu.store.bambulab.com/nl/collections/bambu-lab-3d-printer-filament",
+    "collection_url": "https://eu.store.bambulab.com/collections/bambu-lab-3d-printer-filament",
     "output_dir": "data",
     "output_file": "bambulab_filaments.json",
     "csv_file": "bambulab_filaments.csv",
@@ -472,11 +472,11 @@ async def scrape_collection(url: str) -> dict:
 
 
 def _parse_spool_type(raw: str) -> str:
-    """Parse spool type from variant name part (e.g. 'Bijvullen', 'Filament met spoel')."""
+    """Parse spool type from variant name part (e.g. 'Refill', 'Filament with spool')."""
     raw_lower = raw.strip().lower()
     if raw_lower in ("bijvullen", "navulling", "refill"):
         return "refill"
-    elif "spoel" in raw_lower or "spool" in raw_lower:
+    elif "spool" in raw_lower or "spoel" in raw_lower:
         return "spool"
     return raw.strip()
 
@@ -631,7 +631,7 @@ def parse_products_from_collection(markdown: str) -> list[dict]:
 
     # Find all product links with full URL
     product_links = re.findall(
-        r'\[([^\]]+)\]\((https://eu\.store\.bambulab\.com/nl/products/[^)]+)\)',
+        r'\[([^\]]+)\]\((https://eu\.store\.bambulab\.com(?:/[a-z]{2})?/products/[^)]+)\)',
         markdown
     )
 
