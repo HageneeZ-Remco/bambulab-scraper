@@ -442,12 +442,17 @@ async def scrape_collection(url: str) -> dict:
                         if variants:
                             in_count = sum(1 for v in variants if v["in_stock"])
                             out_count = len(variants) - in_count
+                            spool_count = sum(1 for v in variants if v.get("spool_type") == "spool")
+                            refill_count = sum(1 for v in variants if v.get("spool_type") == "refill")
+                            type_info = ""
+                            if spool_count or refill_count:
+                                type_info = f" [{spool_count} spool, {refill_count} refill]"
                             if out_count == 0:
-                                print(f"✓ ({len(variants)} colors)")
+                                print(f"✓ ({len(variants)} variants{type_info})")
                             elif in_count == 0:
-                                print(f"✗ ALL OUT OF STOCK ({len(variants)} colors)" + (f" ETA: {eta}" if eta else ""))
+                                print(f"✗ ALL OUT OF STOCK ({len(variants)} variants{type_info})" + (f" ETA: {eta}" if eta else ""))
                             else:
-                                print(f"⚠ {out_count}/{len(variants)} colors out of stock")
+                                print(f"⚠ {out_count}/{len(variants)} variants out of stock{type_info}")
                         else:
                             if any_in_stock:
                                 print("✓")
@@ -464,6 +469,16 @@ async def scrape_collection(url: str) -> dict:
             "product_count": len(products),
             "products": products,
         }
+
+
+def _parse_spool_type(raw: str) -> str:
+    """Parse spool type from variant name part (e.g. 'Bijvullen', 'Filament met spoel')."""
+    raw_lower = raw.strip().lower()
+    if raw_lower in ("bijvullen", "navulling", "refill"):
+        return "refill"
+    elif "spoel" in raw_lower or "spool" in raw_lower:
+        return "spool"
+    return raw.strip()
 
 
 def check_stock_status(markdown: str, html: str = None) -> tuple[bool, str | None, list[dict]]:
@@ -491,12 +506,20 @@ def check_stock_status(markdown: str, html: str = None) -> tuple[bool, str | Non
                 product_variants = product.get("variants", [])
                 for v in product_variants:
                     variant_name = v.get("title", v.get("name", "Default"))
+                    spool_type = None
+                    # Parse spool type from variant name if present
+                    if " / " in variant_name:
+                        parts = variant_name.split(" / ")
+                        variant_name = parts[0].split(" - ")[-1] if " - " in parts[0] else parts[0]
+                        if len(parts) > 1:
+                            spool_type = _parse_spool_type(parts[1])
                     # Check availability - could be "available", "in_stock", etc.
                     available = v.get("available", v.get("availableForSale", v.get("in_stock", True)))
                     variants.append({
                         "name": variant_name,
                         "in_stock": bool(available),
                         "price": v.get("price", {}).get("amount") if isinstance(v.get("price"), dict) else v.get("price"),
+                        "spool_type": spool_type,
                         "eta": None,
                     })
             except (json.JSONDecodeError, KeyError, TypeError):
@@ -515,10 +538,13 @@ def check_stock_status(markdown: str, html: str = None) -> tuple[bool, str | Non
                     if schema_data.get("@type") == "ProductGroup" and "hasVariant" in schema_data:
                         for v in schema_data.get("hasVariant", []):
                             variant_name = v.get("name", "Default")
-                            # Clean up variant name (remove long product prefix)
+                            spool_type = None
+                            # Parse variant name: "PLA Basic - Jadewit (10100) / Bijvullen / 1kg"
                             if " / " in variant_name:
                                 parts = variant_name.split(" / ")
                                 variant_name = parts[0].split(" - ")[-1] if " - " in parts[0] else parts[0]
+                                if len(parts) > 1:
+                                    spool_type = _parse_spool_type(parts[1])
 
                             offers = v.get("offers", {})
                             availability = offers.get("availability", "")
@@ -527,6 +553,7 @@ def check_stock_status(markdown: str, html: str = None) -> tuple[bool, str | Non
                                 "name": variant_name,
                                 "in_stock": in_stock,
                                 "price": offers.get("price"),
+                                "spool_type": spool_type,
                                 "eta": None,
                             })
                         if variants:
@@ -695,17 +722,23 @@ def compare_data(old_data: dict, new_data: dict) -> dict:
         product_name = new_p.get("name", handle)
         product_url = new_p.get("url")
 
-        # Build variant lookup by name
-        old_variants = {v["name"]: v for v in old_p.get("variants", [])}
-        new_variants = {v["name"]: v for v in new_p.get("variants", [])}
+        # Build variant lookup by name + spool_type
+        def _variant_key(v):
+            return (v["name"], v.get("spool_type") or "")
+
+        old_variants = {_variant_key(v): v for v in old_p.get("variants", [])}
+        new_variants = {_variant_key(v): v for v in new_p.get("variants", [])}
 
         # Check each variant for stock changes
         # Only compare variants that exist in BOTH old and new data
         common_variants = set(old_variants.keys()) & set(new_variants.keys())
 
-        for variant_name in common_variants:
-            old_v = old_variants[variant_name]
-            new_v = new_variants[variant_name]
+        for vkey in common_variants:
+            old_v = old_variants[vkey]
+            new_v = new_variants[vkey]
+            variant_name = vkey[0]
+            spool_type = new_v.get("spool_type")
+            variant_label = f"{variant_name} ({spool_type})" if spool_type else variant_name
 
             old_in_stock = old_v.get("in_stock", True)
             new_in_stock = new_v.get("in_stock", True)
@@ -714,7 +747,8 @@ def compare_data(old_data: dict, new_data: dict) -> dict:
             if old_in_stock and not new_in_stock:
                 out_of_stock_variants.append({
                     "product_name": product_name,
-                    "variant_name": variant_name,
+                    "variant_name": variant_label,
+                    "spool_type": spool_type,
                     "price": new_v.get("price"),
                     "eta": new_v.get("eta") or new_p.get("eta"),
                     "url": product_url,
@@ -724,7 +758,8 @@ def compare_data(old_data: dict, new_data: dict) -> dict:
             if not old_in_stock and new_in_stock:
                 in_stock_variants.append({
                     "product_name": product_name,
-                    "variant_name": variant_name,
+                    "variant_name": variant_label,
+                    "spool_type": spool_type,
                     "price": new_v.get("price"),
                     "url": product_url,
                 })
@@ -774,7 +809,7 @@ def save_csv(data: dict, filepath: str) -> None:
         print("No products to save to CSV")
         return
 
-    fieldnames = ["name", "handle", "price", "price_eur", "url", "in_stock", "eta"]
+    fieldnames = ["name", "handle", "price", "price_eur", "url", "in_stock", "eta", "spool_type"]
 
     with open(filepath, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
@@ -862,9 +897,12 @@ async def main():
             for product in data.get("products", []):
                 for variant in product.get("variants", []):
                     if not variant.get("in_stock", True):
+                        spool_type = variant.get("spool_type")
+                        variant_label = f"{variant.get('name')} ({spool_type})" if spool_type else variant.get("name")
                         all_out_of_stock.append({
                             "product_name": product.get("name"),
-                            "variant_name": variant.get("name"),
+                            "variant_name": variant_label,
+                            "spool_type": spool_type,
                             "price": variant.get("price"),
                             "eta": variant.get("eta") or product.get("eta"),
                             "url": product.get("url"),
@@ -961,9 +999,12 @@ async def run_loop(interval_minutes: int, args):
                 for product in data.get("products", []):
                     for variant in product.get("variants", []):
                         if not variant.get("in_stock", True):
+                            spool_type = variant.get("spool_type")
+                            variant_label = f"{variant.get('name')} ({spool_type})" if spool_type else variant.get("name")
                             all_out_of_stock.append({
                                 "product_name": product.get("name"),
-                                "variant_name": variant.get("name"),
+                                "variant_name": variant_label,
+                                "spool_type": spool_type,
                                 "price": variant.get("price"),
                                 "eta": variant.get("eta") or product.get("eta"),
                                 "url": product.get("url"),
