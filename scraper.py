@@ -41,9 +41,10 @@ import requests
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 try:
-    from crawl4ai import AsyncWebCrawler
+    from crawl4ai import AsyncWebCrawler, BrowserConfig
 except ImportError:
     print("Error: crawl4ai not installed!")
     print("Install with: pip install crawl4ai")
@@ -88,6 +89,7 @@ DEFAULT_GLOBAL_SETTINGS = {
     "delay_between_stores_seconds": 10,
     "browser_timeout_ms": 30000,
     "max_retries": 2,
+    "proxy": "",
 }
 
 # Default Discord embed colors
@@ -442,7 +444,7 @@ def notify_price_changes(config: dict, changes: list[dict], store_id: str = "EU"
 # SCRAPING
 # =============================================================================
 
-async def scrape_store(store_id: str, collection_url: str, config: dict) -> dict:
+async def scrape_store(store_id: str, collection_url: str, config: dict, store_config: dict = None) -> dict:
     """
     Scrape a store collection page and extract product data.
     Visits each product page to check stock status.
@@ -451,6 +453,7 @@ async def scrape_store(store_id: str, collection_url: str, config: dict) -> dict
         store_id: Store identifier (e.g., "EU", "US")
         collection_url: The collection URL to scrape
         config: Configuration dict with global_settings
+        store_config: Store-specific configuration dict (optional)
 
     Returns:
         dict with products list, metadata, and store_id
@@ -459,11 +462,29 @@ async def scrape_store(store_id: str, collection_url: str, config: dict) -> dict
     delay_between_pages = global_settings.get("delay_between_pages_seconds", 2)
     browser_timeout = global_settings.get("browser_timeout_ms", 30000)
 
+    # Check for proxy configuration
+    proxy = None
+    if store_config:
+        proxy = store_config.get("proxy")
+    if not proxy:
+        proxy = global_settings.get("proxy")
+
+    browser_config = BrowserConfig(
+        headless=True,
+        verbose=False,
+    )
+    if proxy:
+        browser_config = BrowserConfig(
+            headless=True,
+            verbose=False,
+            proxy=proxy,
+        )
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Using proxy for {store_id}: {proxy.split('@')[-1] if '@' in proxy else proxy}")
+
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Scraping {store_id} collection: {collection_url}")
 
     async with AsyncWebCrawler(
-        headless=True,
-        verbose=False,
+        config=browser_config,
     ) as crawler:
         # First get the collection page to find all products
         result = await crawler.arun(
@@ -475,8 +496,20 @@ async def scrape_store(store_id: str, collection_url: str, config: dict) -> dict
         if not result.success:
             raise Exception(f"Failed to fetch page: {result.error_message}")
 
-        # Parse basic product info from collection
-        products = parse_products_from_collection(result.markdown, collection_url)
+        # Detect geo-redirect: check if we got redirected to a different store
+        parse_url = collection_url
+        redirected = False
+        expected_host = urlparse(collection_url).netloc
+        if result.url:
+            actual_host = urlparse(result.url).netloc
+            if actual_host != expected_host:
+                redirected = True
+                parse_url = result.url  # Use actual URL for parsing
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️  GEO-REDIRECT: {store_id} redirected {expected_host} → {actual_host}")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️  Scraping {actual_host} data instead (configure proxy in config.json to fix)")
+
+        # Parse basic product info from collection (using actual URL after redirect)
+        products = parse_products_from_collection(result.markdown, parse_url)
 
         # Now visit each product page to check stock status
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking stock for {len(products)} products...")
@@ -701,20 +734,25 @@ def check_stock_status(markdown: str, html: str = None) -> tuple[bool, str | Non
 
 def parse_products_from_collection(markdown: str, collection_url: str) -> list[dict]:
     """Parse basic product info from collection page."""
-    from urllib.parse import urlparse
-
     products = []
 
     # Extract base URL from collection URL
     parsed = urlparse(collection_url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
 
-    # Dynamic regex for product links
+    # Primary: match expected store URL
     escaped_base = re.escape(base_url)
     product_links = re.findall(
         rf'\[([^\]]+)\]\(({escaped_base}(?:/[a-z]{{2}})?/products/[^)]+)\)',
         markdown
     )
+
+    # Fallback: if no products found, try matching ANY bambulab store URL
+    if not product_links:
+        product_links = re.findall(
+            r'\[([^\]]+)\]\((https://[a-z]+\.store\.bambulab\.com(?:/[a-z]{2})?/products/[^)]+)\)',
+            markdown
+        )
 
     # Find all prices in the markdown (support multiple currencies)
     all_prices = re.findall(r'(?:Van\s+)?[€$£¥₩]\s*([\d,\.]+)', markdown)
@@ -1010,7 +1048,7 @@ async def main():
             old_data = load_previous_data(json_path)
 
             # Scrape the collection
-            data = await scrape_store(store_id, collection_url, config)
+            data = await scrape_store(store_id, collection_url, config, store_config)
 
             if not args.quiet:
                 print(f"\n{'='*50}")
@@ -1246,7 +1284,7 @@ async def run_multi_store_loop(args):
 
         try:
             old_data = load_previous_data(json_path)
-            data = await scrape_store(store_id, collection_url, config)
+            data = await scrape_store(store_id, collection_url, config, store_config)
 
             changes = compare_data(old_data, data)
 

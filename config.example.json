@@ -3,49 +3,58 @@
     "US": {
       "url": "https://us.store.bambulab.com/collections/bambu-lab-3d-printer-filament",
       "enabled": true,
-      "interval_minutes": 7.5
+      "interval_minutes": 7.5,
+      "proxy": ""
     },
     "EU": {
       "url": "https://eu.store.bambulab.com/collections/bambu-lab-3d-printer-filament",
       "enabled": true,
-      "interval_minutes": 7.5
+      "interval_minutes": 7.5,
+      "proxy": ""
     },
     "CA": {
       "url": "https://ca.store.bambulab.com/collections/bambu-lab-3d-printer-filament",
       "enabled": true,
-      "interval_minutes": 7.5
+      "interval_minutes": 7.5,
+      "proxy": ""
     },
     "UK": {
       "url": "https://uk.store.bambulab.com/collections/bambu-lab-3d-printer-filament",
       "enabled": true,
-      "interval_minutes": 7.5
+      "interval_minutes": 7.5,
+      "proxy": ""
     },
     "AU": {
       "url": "https://au.store.bambulab.com/collections/bambu-lab-3d-printer-filament",
       "enabled": true,
-      "interval_minutes": 7.5
+      "interval_minutes": 7.5,
+      "proxy": ""
     },
     "JP": {
       "url": "https://jp.store.bambulab.com/collections/bambu-lab-3d-printer-filament",
       "enabled": true,
-      "interval_minutes": 7.5
+      "interval_minutes": 7.5,
+      "proxy": ""
     },
     "KR": {
       "url": "https://kr.store.bambulab.com/collections/bambu-lab-3d-printer-filament",
       "enabled": true,
-      "interval_minutes": 7.5
+      "interval_minutes": 7.5,
+      "proxy": ""
     },
     "ASIA": {
       "url": "https://asia.store.bambulab.com/collections/bambu-lab-3d-printer-filament",
       "enabled": true,
-      "interval_minutes": 7.5
+      "interval_minutes": 7.5,
+      "proxy": ""
     }
   },
   "global_settings": {
     "delay_between_pages_seconds": 2,
     "delay_between_stores_seconds": 10,
     "browser_timeout_ms": 30000,
-    "max_retries": 2
+    "max_retries": 2,
+    "proxy": ""
   },
   "discord_webhooks": {
     "stock_alerts": [
