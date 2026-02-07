@@ -2,23 +2,32 @@
 """
 Bambu Lab Filament Scraper
 ==========================
-Scrapes filament products from the Bambu Lab EU store.
+Scrapes filament products from Bambu Lab stores (US, EU, CA, UK, AU, JP, KR, ASIA).
 Sends Discord notifications for stock changes, new items, and removed items.
 
 Requirements:
     pip install crawl4ai requests
 
 Usage:
-    python scraper.py                    # Scrape and save to JSON
-    python scraper.py --csv              # Also export to CSV
-    python scraper.py --output data.json # Custom output file
-    python scraper.py --no-notify        # Skip Discord notifications
+    python scraper.py                      # Scrape EU store (default)
+    python scraper.py --stores US,UK       # Scrape specific stores
+    python scraper.py --list-stores        # List all configured stores
+    python scraper.py --multi-loop         # Run multi-store rotation loop
+    python scraper.py --loop 60            # Run EU store every 60 minutes
+    python scraper.py --csv                # Also export to CSV
+    python scraper.py --no-notify          # Skip Discord notifications
 
-Cron Example (every hour):
+Multi-Store Loop:
+    python scraper.py --multi-loop --force-notify
+
+    Runs all enabled stores in a staggered rotation with configurable intervals.
+    Edit config.json to enable/disable stores or adjust intervals.
+
+Cron Example (single store):
     0 * * * * cd /path/to/scraper && /usr/bin/python3 scraper.py --csv >> /var/log/bambu-scraper.log 2>&1
 
 Author: HageneeZ
-Version: 2.0.0
+Version: 3.0.0
 """
 
 import asyncio
@@ -55,6 +64,32 @@ CONFIG = {
     "config_file": "config.json",  # For webhooks
 }
 
+# Store flags for Discord notifications
+STORE_FLAGS = {
+    "US": "🇺🇸", "EU": "🇪🇺", "CA": "🇨🇦", "UK": "🇬🇧",
+    "AU": "🇦🇺", "JP": "🇯🇵", "KR": "🇰🇷", "ASIA": "🌏",
+}
+
+# Default store configurations
+DEFAULT_STORES = {
+    "US": {"url": "https://us.store.bambulab.com/collections/bambu-lab-3d-printer-filament", "enabled": True, "interval_minutes": 7.5},
+    "EU": {"url": "https://eu.store.bambulab.com/collections/bambu-lab-3d-printer-filament", "enabled": True, "interval_minutes": 7.5},
+    "CA": {"url": "https://ca.store.bambulab.com/collections/bambu-lab-3d-printer-filament", "enabled": True, "interval_minutes": 7.5},
+    "UK": {"url": "https://uk.store.bambulab.com/collections/bambu-lab-3d-printer-filament", "enabled": True, "interval_minutes": 7.5},
+    "AU": {"url": "https://au.store.bambulab.com/collections/bambu-lab-3d-printer-filament", "enabled": True, "interval_minutes": 7.5},
+    "JP": {"url": "https://jp.store.bambulab.com/collections/bambu-lab-3d-printer-filament", "enabled": True, "interval_minutes": 7.5},
+    "KR": {"url": "https://kr.store.bambulab.com/collections/bambu-lab-3d-printer-filament", "enabled": True, "interval_minutes": 7.5},
+    "ASIA": {"url": "https://asia.store.bambulab.com/collections/bambu-lab-3d-printer-filament", "enabled": True, "interval_minutes": 7.5},
+}
+
+# Default global settings
+DEFAULT_GLOBAL_SETTINGS = {
+    "delay_between_pages_seconds": 2,
+    "delay_between_stores_seconds": 10,
+    "browser_timeout_ms": 30000,
+    "max_retries": 2,
+}
+
 # Default Discord embed colors
 COLORS = {
     "new_item": 0x00FF00,      # Green - new product added
@@ -78,6 +113,8 @@ def load_config(config_path: str) -> dict:
     except FileNotFoundError:
         # Create default config
         config = {
+            "stores": DEFAULT_STORES,
+            "global_settings": DEFAULT_GLOBAL_SETTINGS,
             "discord_webhooks": {
                 "stock_alerts": [],
                 "new_items": [],
@@ -99,6 +136,12 @@ def load_config(config_path: str) -> dict:
     except json.JSONDecodeError as e:
         print(f"[ERROR] Invalid config file: {e}")
         config = {"discord_webhooks": {}, "notify_on": {}}
+
+    # Ensure stores and global_settings exist (for backward compatibility)
+    if "stores" not in config:
+        config["stores"] = DEFAULT_STORES
+    if "global_settings" not in config:
+        config["global_settings"] = DEFAULT_GLOBAL_SETTINGS
 
     # Override with environment variables (for Pterodactyl/Docker)
     env_webhooks = {
@@ -125,6 +168,12 @@ def save_config(config: dict, config_path: str) -> None:
     """Save configuration to JSON file."""
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2)
+
+
+def get_enabled_stores(config: dict) -> dict:
+    """Return only enabled stores from config."""
+    stores = config.get("stores", DEFAULT_STORES)
+    return {k: v for k, v in stores.items() if v.get("enabled", True)}
 
 
 def send_discord_notification(
@@ -224,7 +273,7 @@ def get_webhooks_for_event(config: dict, event_type: str) -> list[str]:
     return combined
 
 
-def notify_out_of_stock(config: dict, variants: list[dict]) -> None:
+def notify_out_of_stock(config: dict, variants: list[dict], store_id: str = "EU") -> None:
     """Send a SINGLE notification for ALL variants that went out of stock."""
     if not config.get("notify_on", {}).get("out_of_stock", True):
         return
@@ -232,6 +281,7 @@ def notify_out_of_stock(config: dict, variants: list[dict]) -> None:
         return
 
     webhooks = get_webhooks_for_event(config, "stock_alerts")
+    flag = STORE_FLAGS.get(store_id, "🌐")
 
     # Group variants by product
     by_product = {}
@@ -264,13 +314,13 @@ def notify_out_of_stock(config: dict, variants: list[dict]) -> None:
 
     send_discord_notification(
         webhooks=webhooks,
-        title=f"⚠️ Out of Stock Report ({total_colors} colors)",
+        title=f"{flag} {store_id} - ⚠️ Out of Stock Report ({total_colors} colors)",
         description=description,
         color=COLORS["out_of_stock"],
     )
 
 
-def notify_in_stock(config: dict, variants: list[dict]) -> None:
+def notify_in_stock(config: dict, variants: list[dict], store_id: str = "EU") -> None:
     """Send a SINGLE notification for ALL variants that came back in stock."""
     if not config.get("notify_on", {}).get("in_stock", True):
         return
@@ -278,6 +328,7 @@ def notify_in_stock(config: dict, variants: list[dict]) -> None:
         return
 
     webhooks = get_webhooks_for_event(config, "stock_alerts")
+    flag = STORE_FLAGS.get(store_id, "🌐")
 
     # Group variants by product
     by_product = {}
@@ -306,13 +357,13 @@ def notify_in_stock(config: dict, variants: list[dict]) -> None:
 
     send_discord_notification(
         webhooks=webhooks,
-        title=f"✅ Back in Stock! ({total_colors} colors)",
+        title=f"{flag} {store_id} - ✅ Back in Stock! ({total_colors} colors)",
         description=description,
         color=COLORS["in_stock"],
     )
 
 
-def notify_new_items(config: dict, products: list[dict]) -> None:
+def notify_new_items(config: dict, products: list[dict], store_id: str = "EU") -> None:
     """Send notification for newly added products."""
     if not config.get("notify_on", {}).get("new_items", True):
         return
@@ -320,11 +371,12 @@ def notify_new_items(config: dict, products: list[dict]) -> None:
         return
 
     webhooks = get_webhooks_for_event(config, "new_items")
+    flag = STORE_FLAGS.get(store_id, "🌐")
 
     for product in products:
         send_discord_notification(
             webhooks=webhooks,
-            title="🆕 New Product!",
+            title=f"{flag} {store_id} - 🆕 New Product!",
             description=f"**{product['name']}** has been added to the store",
             color=COLORS["new_item"],
             fields=[
@@ -335,7 +387,7 @@ def notify_new_items(config: dict, products: list[dict]) -> None:
         )
 
 
-def notify_removed_items(config: dict, products: list[dict]) -> None:
+def notify_removed_items(config: dict, products: list[dict], store_id: str = "EU") -> None:
     """Send notification for removed products."""
     if not config.get("notify_on", {}).get("removed_items", True):
         return
@@ -343,11 +395,12 @@ def notify_removed_items(config: dict, products: list[dict]) -> None:
         return
 
     webhooks = get_webhooks_for_event(config, "removed_items")
+    flag = STORE_FLAGS.get(store_id, "🌐")
 
     for product in products:
         send_discord_notification(
             webhooks=webhooks,
-            title="🗑️ Product Removed",
+            title=f"{flag} {store_id} - 🗑️ Product Removed",
             description=f"**{product['name']}** is no longer available",
             color=COLORS["removed_item"],
             fields=[
@@ -358,7 +411,7 @@ def notify_removed_items(config: dict, products: list[dict]) -> None:
         )
 
 
-def notify_price_changes(config: dict, changes: list[dict]) -> None:
+def notify_price_changes(config: dict, changes: list[dict], store_id: str = "EU") -> None:
     """Send notification for price changes."""
     if not config.get("notify_on", {}).get("price_changes", True):
         return
@@ -366,13 +419,14 @@ def notify_price_changes(config: dict, changes: list[dict]) -> None:
         return
 
     webhooks = get_webhooks_for_event(config, "price_changes")
+    flag = STORE_FLAGS.get(store_id, "🌐")
 
     for change in changes:
         is_drop = change.get("change", "").startswith("-")
 
         send_discord_notification(
             webhooks=webhooks,
-            title="💰 Price Drop!" if is_drop else "📈 Price Increase",
+            title=f"{flag} {store_id} - {'💰 Price Drop!' if is_drop else '📈 Price Increase'}",
             description=f"**{change['name']}** price changed",
             color=COLORS["price_drop"] if is_drop else COLORS["price_increase"],
             fields=[
@@ -388,18 +442,24 @@ def notify_price_changes(config: dict, changes: list[dict]) -> None:
 # SCRAPING
 # =============================================================================
 
-async def scrape_collection(url: str) -> dict:
+async def scrape_store(store_id: str, collection_url: str, config: dict) -> dict:
     """
-    Scrape a collection page and extract product data.
+    Scrape a store collection page and extract product data.
     Visits each product page to check stock status.
 
     Args:
-        url: The collection URL to scrape
+        store_id: Store identifier (e.g., "EU", "US")
+        collection_url: The collection URL to scrape
+        config: Configuration dict with global_settings
 
     Returns:
-        dict with products list and metadata
+        dict with products list, metadata, and store_id
     """
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scraping collection: {url}")
+    global_settings = config.get("global_settings", DEFAULT_GLOBAL_SETTINGS)
+    delay_between_pages = global_settings.get("delay_between_pages_seconds", 2)
+    browser_timeout = global_settings.get("browser_timeout_ms", 30000)
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scraping {store_id} collection: {collection_url}")
 
     async with AsyncWebCrawler(
         headless=True,
@@ -407,7 +467,7 @@ async def scrape_collection(url: str) -> dict:
     ) as crawler:
         # First get the collection page to find all products
         result = await crawler.arun(
-            url=url,
+            url=collection_url,
             bypass_cache=True,
             page_timeout=60000,
         )
@@ -416,7 +476,7 @@ async def scrape_collection(url: str) -> dict:
             raise Exception(f"Failed to fetch page: {result.error_message}")
 
         # Parse basic product info from collection
-        products = parse_products_from_collection(result.markdown)
+        products = parse_products_from_collection(result.markdown, collection_url)
 
         # Now visit each product page to check stock status
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking stock for {len(products)} products...")
@@ -428,7 +488,7 @@ async def scrape_collection(url: str) -> dict:
                     stock_result = await crawler.arun(
                         url=product["url"],
                         bypass_cache=True,
-                        page_timeout=30000,
+                        page_timeout=browser_timeout,
                     )
                     if stock_result.success:
                         # crawl4ai returns raw_html or html depending on version
@@ -463,12 +523,26 @@ async def scrape_collection(url: str) -> dict:
                 except Exception as e:
                     print(f"? (error: {e})")
 
+                # Delay between product pages
+                if i < len(products) - 1:
+                    await asyncio.sleep(delay_between_pages)
+
         return {
+            "store_id": store_id,
             "scraped_at": datetime.now().isoformat(),
-            "source_url": CONFIG["collection_url"],
+            "source_url": collection_url,
             "product_count": len(products),
             "products": products,
         }
+
+
+async def scrape_collection(url: str) -> dict:
+    """
+    LEGACY: Scrape a collection page (backward compatibility).
+    Use scrape_store() for new code.
+    """
+    config = {"global_settings": DEFAULT_GLOBAL_SETTINGS}
+    return await scrape_store("EU", url, config)
 
 
 def _parse_spool_type(raw: str) -> str:
@@ -625,18 +699,25 @@ def check_stock_status(markdown: str, html: str = None) -> tuple[bool, str | Non
     return True, None, []
 
 
-def parse_products_from_collection(markdown: str) -> list[dict]:
+def parse_products_from_collection(markdown: str, collection_url: str) -> list[dict]:
     """Parse basic product info from collection page."""
+    from urllib.parse import urlparse
+
     products = []
 
-    # Find all product links with full URL
+    # Extract base URL from collection URL
+    parsed = urlparse(collection_url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Dynamic regex for product links
+    escaped_base = re.escape(base_url)
     product_links = re.findall(
-        r'\[([^\]]+)\]\((https://eu\.store\.bambulab\.com(?:/[a-z]{2})?/products/[^)]+)\)',
+        rf'\[([^\]]+)\]\(({escaped_base}(?:/[a-z]{{2}})?/products/[^)]+)\)',
         markdown
     )
 
-    # Find all prices in the markdown
-    all_prices = re.findall(r'(?:Van\s+)?€\s*([\d,\.]+)\s*EUR?', markdown)
+    # Find all prices in the markdown (support multiple currencies)
+    all_prices = re.findall(r'(?:Van\s+)?[€$£¥₩]\s*([\d,\.]+)', markdown)
 
     # Track seen URLs to avoid duplicates
     seen_urls = set()
@@ -651,12 +732,23 @@ def parse_products_from_collection(markdown: str) -> list[dict]:
         seen_urls.add(url)
 
         price = None
-        price_eur = None
+        price_numeric = None
         if price_index < len(all_prices):
             price_str = all_prices[price_index]
-            price = f"€{price_str}"
+            # Detect currency from original markdown (simple heuristic)
+            currency_symbol = "€"  # Default
+            if "$" in markdown[max(0, markdown.find(price_str) - 5):markdown.find(price_str) + len(price_str) + 5]:
+                currency_symbol = "$"
+            elif "£" in markdown[max(0, markdown.find(price_str) - 5):markdown.find(price_str) + len(price_str) + 5]:
+                currency_symbol = "£"
+            elif "¥" in markdown[max(0, markdown.find(price_str) - 5):markdown.find(price_str) + len(price_str) + 5]:
+                currency_symbol = "¥"
+            elif "₩" in markdown[max(0, markdown.find(price_str) - 5):markdown.find(price_str) + len(price_str) + 5]:
+                currency_symbol = "₩"
+
+            price = f"{currency_symbol}{price_str}"
             try:
-                price_eur = float(price_str.replace(',', '.'))
+                price_numeric = float(price_str.replace(',', '.'))
             except ValueError:
                 pass
             price_index += 1
@@ -667,7 +759,7 @@ def parse_products_from_collection(markdown: str) -> list[dict]:
             "name": name.strip(),
             "handle": handle,
             "price": price,
-            "price_eur": price_eur,
+            "price_eur": price_numeric,  # Keep field name for backward compat, but it's now multi-currency
             "url": url,
             "in_stock": True,   # Will be updated when visiting product page
             "eta": None,        # Will be updated if out of stock with ETA
@@ -841,18 +933,31 @@ async def main():
     parser.add_argument("--no-notify", action="store_true", help="Skip Discord notifications")
     parser.add_argument("--force-notify", action="store_true", help="Send notifications for ALL current out-of-stock items (useful for first run)")
     parser.add_argument("--test-webhook", help="Send test notification to webhook URL")
-    parser.add_argument("--loop", type=int, metavar="MINUTES", help="Keep running, scrape every N minutes")
+    parser.add_argument("--loop", type=int, metavar="MINUTES", help="Keep running, scrape every N minutes (EU store only)")
+    parser.add_argument("--multi-loop", action="store_true", help="Run multi-store staggered rotation loop")
+    parser.add_argument("--stores", help="Comma-separated list of stores to scrape (e.g., EU,US,UK)")
+    parser.add_argument("--list-stores", action="store_true", help="List all configured stores and exit")
     args = parser.parse_args()
 
     # Setup paths
     script_dir = Path(__file__).parent
     output_dir = script_dir / CONFIG["output_dir"]
-    json_path = args.output or str(output_dir / CONFIG["output_file"])
-    csv_path = str(output_dir / CONFIG["csv_file"])
     config_path = str(script_dir / CONFIG["config_file"])
 
     # Load config
     config = load_config(config_path)
+
+    # List stores mode
+    if args.list_stores:
+        stores = config.get("stores", DEFAULT_STORES)
+        print("\n=== Configured Stores ===")
+        for store_id, store_config in stores.items():
+            flag = STORE_FLAGS.get(store_id, "🌐")
+            enabled = "✓" if store_config.get("enabled", True) else "✗"
+            interval = store_config.get("interval_minutes", 7.5)
+            url = store_config.get("url", "N/A")
+            print(f"{flag} {store_id:8s} {enabled} - {interval:5.1f} min - {url}")
+        return 0
 
     # Test webhook mode
     if args.test_webhook:
@@ -869,89 +974,120 @@ async def main():
         )
         return 0
 
-    # Load previous data for comparison
-    old_data = load_previous_data(json_path)
+    # Parse stores filter if provided
+    store_filter = None
+    if args.stores:
+        store_filter = [s.strip().upper() for s in args.stores.split(",")]
+        print(f"[FILTER] Scraping only: {', '.join(store_filter)}")
+
+    # Determine which stores to scrape
+    if store_filter:
+        # Use filter
+        all_stores = config.get("stores", DEFAULT_STORES)
+        stores_to_scrape = {k: v for k, v in all_stores.items() if k in store_filter and v.get("enabled", True)}
+        if not stores_to_scrape:
+            print(f"[ERROR] No enabled stores match filter: {store_filter}")
+            return 1
+    else:
+        # Default to EU for backward compatibility
+        stores_to_scrape = {"EU": config.get("stores", DEFAULT_STORES).get("EU", DEFAULT_STORES["EU"])}
 
     try:
-        # Scrape the collection
-        data = await scrape_collection(CONFIG["collection_url"])
+        # Scrape each store
+        for store_id, store_config in stores_to_scrape.items():
+            collection_url = store_config.get("url", CONFIG["collection_url"])
 
-        if not args.quiet:
-            print(f"\n{'='*50}")
-            print(f"Scraped {data['product_count']} products")
-            print(f"{'='*50}\n")
+            if len(stores_to_scrape) > 1:
+                print(f"\n{'='*60}")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Scraping store: {STORE_FLAGS.get(store_id, '🌐')} {store_id}")
+                print(f"{'='*60}")
 
-            # Show sample products
-            for product in data["products"][:5]:
-                stock_status = "✅" if product.get("in_stock", True) else "❌"
-                print(f"  {stock_status} {product['name']}: {product['price'] or 'N/A'}")
-            if data["product_count"] > 5:
-                print(f"  ... and {data['product_count'] - 5} more\n")
+            # Setup paths for this store
+            json_path = args.output or str(output_dir / f"{store_id}_filaments.json")
+            csv_path = str(output_dir / f"{store_id}_filaments.csv")
 
-        # Compare with previous data
-        changes = compare_data(old_data, data)
+            # Load previous data for comparison
+            old_data = load_previous_data(json_path)
 
-        # Force notify: build list of ALL current out-of-stock variants
-        if args.force_notify:
-            all_out_of_stock = []
-            for product in data.get("products", []):
-                for variant in product.get("variants", []):
-                    if not variant.get("in_stock", True):
-                        spool_type = variant.get("spool_type")
-                        variant_label = f"{variant.get('name')} ({spool_type})" if spool_type else variant.get("name")
-                        all_out_of_stock.append({
-                            "product_name": product.get("name"),
-                            "variant_name": variant_label,
-                            "spool_type": spool_type,
-                            "price": variant.get("price"),
-                            "eta": variant.get("eta") or product.get("eta"),
-                            "url": product.get("url"),
-                        })
-            changes["out_of_stock_variants"] = all_out_of_stock
-            print(f"\n[FORCE] Found {len(all_out_of_stock)} out-of-stock variants to notify")
+            # Scrape the collection
+            data = await scrape_store(store_id, collection_url, config)
 
-        # Log changes
-        if not args.quiet:
-            if changes["new_items"]:
-                print(f"\n🆕 NEW ITEMS ({len(changes['new_items'])}):")
-                for item in changes["new_items"]:
-                    print(f"   + {item['name']}: {item.get('price', 'N/A')}")
+            if not args.quiet:
+                print(f"\n{'='*50}")
+                print(f"Scraped {data['product_count']} products from {store_id}")
+                print(f"{'='*50}\n")
 
-            if changes["removed_items"]:
-                print(f"\n🗑️ REMOVED ITEMS ({len(changes['removed_items'])}):")
-                for item in changes["removed_items"]:
-                    print(f"   - {item['name']}")
+                # Show sample products
+                for product in data["products"][:5]:
+                    stock_status = "✅" if product.get("in_stock", True) else "❌"
+                    print(f"  {stock_status} {product['name']}: {product['price'] or 'N/A'}")
+                if data["product_count"] > 5:
+                    print(f"  ... and {data['product_count'] - 5} more\n")
 
-            if changes["out_of_stock_variants"]:
-                print(f"\n⚠️ OUT OF STOCK ({len(changes['out_of_stock_variants'])} colors):")
-                for item in changes["out_of_stock_variants"]:
-                    eta = f" (ETA: {item['eta']})" if item.get('eta') else ""
-                    print(f"   ! {item['product_name']} - {item['variant_name']}{eta}")
+            # Compare with previous data
+            changes = compare_data(old_data, data)
 
-            if changes["in_stock_variants"]:
-                print(f"\n✅ BACK IN STOCK ({len(changes['in_stock_variants'])} colors):")
-                for item in changes["in_stock_variants"]:
-                    price = f": €{item['price']}" if item.get('price') else ""
-                    print(f"   + {item['product_name']} - {item['variant_name']}{price}")
+            # Force notify: build list of ALL current out-of-stock variants
+            if args.force_notify:
+                all_out_of_stock = []
+                for product in data.get("products", []):
+                    for variant in product.get("variants", []):
+                        if not variant.get("in_stock", True):
+                            spool_type = variant.get("spool_type")
+                            variant_label = f"{variant.get('name')} ({spool_type})" if spool_type else variant.get("name")
+                            all_out_of_stock.append({
+                                "product_name": product.get("name"),
+                                "variant_name": variant_label,
+                                "spool_type": spool_type,
+                                "price": variant.get("price"),
+                                "eta": variant.get("eta") or product.get("eta"),
+                                "url": product.get("url"),
+                            })
+                changes["out_of_stock_variants"] = all_out_of_stock
+                print(f"\n[FORCE] Found {len(all_out_of_stock)} out-of-stock variants to notify")
 
-            if changes["price_changes"]:
-                print(f"\n💰 PRICE CHANGES ({len(changes['price_changes'])}):")
-                for change in changes["price_changes"]:
-                    print(f"   {change['name']}: {change['old_price']} → {change['new_price']} ({change['change']})")
+            # Log changes
+            if not args.quiet:
+                if changes["new_items"]:
+                    print(f"\n🆕 NEW ITEMS ({len(changes['new_items'])}):")
+                    for item in changes["new_items"]:
+                        print(f"   + {item['name']}: {item.get('price', 'N/A')}")
 
-        # Send Discord notifications
-        if not args.no_notify:
-            notify_new_items(config, changes["new_items"])
-            notify_removed_items(config, changes["removed_items"])
-            notify_out_of_stock(config, changes["out_of_stock_variants"])
-            notify_in_stock(config, changes["in_stock_variants"])
-            notify_price_changes(config, changes["price_changes"])
+                if changes["removed_items"]:
+                    print(f"\n🗑️ REMOVED ITEMS ({len(changes['removed_items'])}):")
+                    for item in changes["removed_items"]:
+                        print(f"   - {item['name']}")
 
-        # Save results
-        save_json(data, json_path)
+                if changes["out_of_stock_variants"]:
+                    print(f"\n⚠️ OUT OF STOCK ({len(changes['out_of_stock_variants'])} colors):")
+                    for item in changes["out_of_stock_variants"]:
+                        eta = f" (ETA: {item['eta']})" if item.get('eta') else ""
+                        print(f"   ! {item['product_name']} - {item['variant_name']}{eta}")
 
-        if args.csv:
-            save_csv(data, csv_path)
+                if changes["in_stock_variants"]:
+                    print(f"\n✅ BACK IN STOCK ({len(changes['in_stock_variants'])} colors):")
+                    for item in changes["in_stock_variants"]:
+                        price = f": {item['price']}" if item.get('price') else ""
+                        print(f"   + {item['product_name']} - {item['variant_name']}{price}")
+
+                if changes["price_changes"]:
+                    print(f"\n💰 PRICE CHANGES ({len(changes['price_changes'])}):")
+                    for change in changes["price_changes"]:
+                        print(f"   {change['name']}: {change['old_price']} → {change['new_price']} ({change['change']})")
+
+            # Send Discord notifications
+            if not args.no_notify:
+                notify_new_items(config, changes["new_items"], store_id)
+                notify_removed_items(config, changes["removed_items"], store_id)
+                notify_out_of_stock(config, changes["out_of_stock_variants"], store_id)
+                notify_in_stock(config, changes["in_stock_variants"], store_id)
+                notify_price_changes(config, changes["price_changes"], store_id)
+
+            # Save results
+            save_json(data, json_path)
+
+            if args.csv:
+                save_csv(data, csv_path)
 
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Done!")
         return 0
@@ -962,7 +1098,7 @@ async def main():
 
 
 async def run_loop(interval_minutes: int, args):
-    """Run scraper in a loop with specified interval."""
+    """Run scraper in a loop with specified interval (single store - EU)."""
     import time
 
     print(f"[LOOP] Starting scraper loop - running every {interval_minutes} minutes")
@@ -1023,11 +1159,11 @@ async def run_loop(interval_minutes: int, args):
 
             # Send notifications
             if not args.no_notify:
-                notify_new_items(config, changes["new_items"])
-                notify_removed_items(config, changes["removed_items"])
-                notify_out_of_stock(config, changes["out_of_stock_variants"])
-                notify_in_stock(config, changes["in_stock_variants"])
-                notify_price_changes(config, changes["price_changes"])
+                notify_new_items(config, changes["new_items"], "EU")
+                notify_removed_items(config, changes["removed_items"], "EU")
+                notify_out_of_stock(config, changes["out_of_stock_variants"], "EU")
+                notify_in_stock(config, changes["in_stock_variants"], "EU")
+                notify_price_changes(config, changes["price_changes"], "EU")
 
             save_json(data, json_path)
             if args.csv:
@@ -1048,22 +1184,145 @@ async def run_loop(interval_minutes: int, args):
             time.sleep(interval_minutes * 60)
 
 
-if __name__ == "__main__":
-    # Quick parse to check for --loop
-    import sys
-    if "--loop" in sys.argv:
-        # Parse args first
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--output", "-o")
-        parser.add_argument("--csv", action="store_true")
-        parser.add_argument("--quiet", "-q", action="store_true")
-        parser.add_argument("--no-notify", action="store_true")
-        parser.add_argument("--force-notify", action="store_true")
-        parser.add_argument("--test-webhook")
-        parser.add_argument("--loop", type=int, metavar="MINUTES")
-        args = parser.parse_args()
+async def run_multi_store_loop(args):
+    """Run scraper in staggered rotation across enabled stores."""
+    import time as _time
 
+    script_dir = Path(__file__).parent
+    config_path = str(script_dir / CONFIG["config_file"])
+    config = load_config(config_path)
+
+    stores = get_enabled_stores(config)
+    if not stores:
+        print("[ERROR] No enabled stores found in config!")
+        return
+
+    store_ids = list(stores.keys())
+    print(f"[MULTI] Starting staggered rotation for {len(store_ids)} stores: {', '.join(store_ids)}")
+
+    # Build schedule queue: [[next_run_time, store_id, interval]]
+    store_queue = []
+    global_settings = config.get("global_settings", DEFAULT_GLOBAL_SETTINGS)
+
+    for i, store_id in enumerate(store_ids):
+        store_config = stores[store_id]
+        interval = store_config.get("interval_minutes", 7.5) * 60
+        # Stagger: first store starts immediately, others are spaced out
+        offset = i * global_settings.get("delay_between_stores_seconds", 10)
+        store_queue.append([_time.time() + offset, store_id, interval])
+
+    first_run = True
+
+    while True:
+        # Sort by next run time
+        store_queue.sort(key=lambda x: x[0])
+        next_time, store_id, interval = store_queue[0]
+
+        # Wait until it's time
+        sleep_for = max(0, next_time - _time.time())
+        if sleep_for > 0:
+            next_str = datetime.fromtimestamp(next_time).strftime('%H:%M:%S')
+            print(f"\n[MULTI] Next: {STORE_FLAGS.get(store_id, '🌐')} {store_id} at {next_str} (sleeping {sleep_for:.0f}s)")
+            await asyncio.sleep(sleep_for)
+
+        # Reload config each cycle (allows live changes)
+        config = load_config(config_path)
+        stores = get_enabled_stores(config)
+
+        # Skip if store was disabled
+        if store_id not in stores:
+            store_queue.pop(0)
+            continue
+
+        store_config = stores[store_id]
+        collection_url = store_config["url"]
+
+        print(f"\n{'='*60}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] {STORE_FLAGS.get(store_id, '🌐')} {store_id}: Starting scrape...")
+        print(f"{'='*60}")
+
+        output_dir = script_dir / CONFIG["output_dir"]
+        json_path = str(output_dir / f"{store_id}_filaments.json")
+
+        try:
+            old_data = load_previous_data(json_path)
+            data = await scrape_store(store_id, collection_url, config)
+
+            changes = compare_data(old_data, data)
+
+            # Force notify on first run
+            if first_run and args.force_notify:
+                all_oos = []
+                for product in data.get("products", []):
+                    for variant in product.get("variants", []):
+                        if not variant.get("in_stock", True):
+                            spool_type = variant.get("spool_type")
+                            label = f"{variant.get('name')} ({spool_type})" if spool_type else variant.get("name")
+                            all_oos.append({
+                                "product_name": product.get("name"),
+                                "variant_name": label,
+                                "spool_type": spool_type,
+                                "price": variant.get("price"),
+                                "eta": variant.get("eta") or product.get("eta"),
+                                "url": product.get("url"),
+                            })
+                changes["out_of_stock_variants"] = all_oos
+                first_run = False
+
+            # Log
+            if changes["out_of_stock_variants"]:
+                print(f"⚠️ {store_id}: {len(changes['out_of_stock_variants'])} colors out of stock")
+            if changes["in_stock_variants"]:
+                print(f"✅ {store_id}: {len(changes['in_stock_variants'])} colors back in stock")
+            if changes["price_changes"]:
+                print(f"💰 {store_id}: {len(changes['price_changes'])} price changes")
+
+            # Notify
+            if not args.no_notify:
+                notify_new_items(config, changes["new_items"], store_id)
+                notify_removed_items(config, changes["removed_items"], store_id)
+                notify_out_of_stock(config, changes["out_of_stock_variants"], store_id)
+                notify_in_stock(config, changes["in_stock_variants"], store_id)
+                notify_price_changes(config, changes["price_changes"], store_id)
+
+            save_json(data, json_path)
+            if args.csv:
+                csv_path = str(output_dir / f"{store_id}_filaments.csv")
+                save_csv(data, csv_path)
+
+        except Exception as e:
+            print(f"[ERROR] {store_id}: Scrape failed: {e}")
+
+        # Reschedule this store
+        new_interval = store_config.get("interval_minutes", 7.5) * 60
+        store_queue[0] = [_time.time() + new_interval, store_id, new_interval]
+
+
+if __name__ == "__main__":
+    # Quick parse to check for loop modes
+    import sys
+
+    # Parse args
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", "-o")
+    parser.add_argument("--csv", action="store_true")
+    parser.add_argument("--quiet", "-q", action="store_true")
+    parser.add_argument("--no-notify", action="store_true")
+    parser.add_argument("--force-notify", action="store_true")
+    parser.add_argument("--test-webhook")
+    parser.add_argument("--loop", type=int, metavar="MINUTES")
+    parser.add_argument("--multi-loop", action="store_true")
+    parser.add_argument("--stores")
+    parser.add_argument("--list-stores", action="store_true")
+    args = parser.parse_args()
+
+    if args.multi_loop:
+        # Multi-store staggered rotation
+        asyncio.run(run_multi_store_loop(args))
+    elif args.loop:
+        # Single-store loop (backward compatibility)
         asyncio.run(run_loop(args.loop, args))
     else:
+        # Single run
         exit_code = asyncio.run(main())
         sys.exit(exit_code)

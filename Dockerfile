@@ -28,10 +28,14 @@ RUN pip install playwright && \
 
 # Copy app files
 COPY scraper.py .
+COPY server.py .
 COPY config.example.json .
 
 # Create data directory
 RUN mkdir -p /app/data
 
-# Default: run once
+# Expose port for dashboard
+EXPOSE 5300
+
+# Default: run once (can be overridden in docker-compose)
 CMD ["python", "scraper.py", "--csv"]

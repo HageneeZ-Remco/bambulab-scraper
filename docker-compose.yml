@@ -1,6 +1,20 @@
 version: '3.8'
 
 services:
+  # Dashboard + Scraper (recommended)
+  bambu-dashboard:
+    build: .
+    container_name: bambu-dashboard
+    ports:
+      - "5300:5300"
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json
+    environment:
+      - TZ=Europe/Amsterdam
+    command: ["python", "server.py"]
+    restart: unless-stopped
+
   # Run once and exit (for cron on host or manual runs)
   bambu-scraper:
     build: .
@@ -11,14 +25,14 @@ services:
     environment:
       - TZ=Europe/Amsterdam
 
-  # Keep running, scrape every hour (recommended)
+  # Multi-store loop without dashboard (headless)
   bambu-scraper-loop:
     build: .
     container_name: bambu-scraper-loop
     volumes:
       - ./data:/app/data
-      - ./config.json:/app/config.json:ro
+      - ./config.json:/app/config.json
     environment:
       - TZ=Europe/Amsterdam
-    command: ["python", "scraper.py", "--csv", "--loop", "60"]
+    command: ["python", "scraper.py", "--csv", "--multi-loop"]
     restart: unless-stopped
