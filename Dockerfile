@@ -29,6 +29,7 @@ RUN pip install playwright && \
 # Copy app files
 COPY scraper.py .
 COPY server.py .
+COPY dashboard.html .
 COPY config.example.json .
 
 # Create data directory
